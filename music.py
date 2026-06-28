@@ -1,3 +1,4 @@
+import asyncio
 import os
 from collections import deque
 
@@ -25,11 +26,35 @@ class Music(commands.Cog):
         host = os.getenv("LAVALINK_HOST", "127.0.0.1")
         port = int(os.getenv("LAVALINK_PORT", "2333"))
         password = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
+        uri = f"http://{host}:{port}"
+
+        while True:
+            try:
+                node = wavelink.Node(uri=uri, password=password)
+                await wavelink.Pool.connect(client=self.bot, nodes=[node])
+                print(f"Connected to Lavalink node at {uri}")
+                return
+            except Exception as e:
+                print(f"Failed to connect to Lavalink node: {e}")
+                await asyncio.sleep(5)
+
+    async def is_node_connected(self) -> bool:
         try:
-            await wavelink.NodePool.create_node(bot=self.bot, host=host, port=port, password=password)
-            print(f"Connected to Lavalink node at {host}:{port}")
-        except Exception as e:
-            print(f"Failed to connect to Lavalink node: {e}")
+            node = wavelink.Pool.get_node()
+            return bool(node and getattr(node, "status", None) == "CONNECTED")
+        except Exception:
+            return False
+
+    async def ensure_lavalink(self, interaction: discord.Interaction):
+        if await self.is_node_connected():
+            return
+
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+
+        await self.connect_node()
+        if not await self.is_node_connected():
+            raise RuntimeError("Could not connect to Lavalink node. Make sure the Lavalink service is running and reachable.")
 
     def get_queue(self, guild_id: int):
         return self.queues.setdefault(guild_id, deque())
@@ -67,6 +92,7 @@ class Music(commands.Cog):
         except Exception:
             pass
         try:
+            await self.ensure_lavalink(interaction)
             player = await self.ensure_voice(interaction)
         except RuntimeError:
             return
@@ -106,25 +132,55 @@ class Music(commands.Cog):
             pass
 
         try:
+            await self.ensure_lavalink(interaction)
             player = await self.ensure_voice(interaction)
         except RuntimeError:
             return
 
         try:
             # search via wavelink
-            track = await wavelink.YouTubeTrack.search(query, return_first=True)
+            if query.startswith("http") or query.startswith("https"):
+                search_query = query
+            elif query.lower().startswith("ytsearch:"):
+                search_query = query
+            else:
+                search_query = f"ytsearch:{query}"
+
+            results = await wavelink.Pool.fetch_tracks(search_query)
+            track = None
+            if isinstance(results, list):
+                track = results[0] if results else None
+            else:
+                track = results.tracks[0] if getattr(results, "tracks", None) else None
+
             if not track:
-                await interaction.followup.send("❌ No results found.")
+                if interaction.response.is_done():
+                    await interaction.followup.send("❌ No results found.")
+                else:
+                    await interaction.response.send_message("❌ No results found.")
                 return
+
             await player.play(track)
         except Exception as error:
-            await interaction.followup.send(f"❌ Could not play audio: `{error}`")
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ Could not play audio: `{error}`")
+            else:
+                await interaction.response.send_message(f"❌ Could not play audio: `{error}`")
             return
 
-        if interaction.response.is_done():
-            await interaction.followup.send(make_embed("▶️ Now playing", f"**{track.title}**\n{track.uri}"))
-        else:
-            await interaction.response.send_message(make_embed("▶️ Now playing", f"**{track.title}**\n{track.uri}"))
+        embed = make_embed("▶️ Now playing", f"**{track.title}**\n{track.uri}")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(embed)
+            else:
+                await interaction.response.send_message(embed)
+        except Exception as response_error:
+            print(f"Failed to finish interaction response: {response_error}")
+            # fallback in case the response state changed unexpectedly
+            try:
+                await interaction.followup.send(embed)
+            except Exception:
+                pass
 
         await send_log(self.bot, "COMMAND", f"{interaction.user} queued music: `{track.title}`")
 
