@@ -25,7 +25,7 @@ class Music(commands.Cog):
         password = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
         
         # UPDATED LINE ONLY: Changed http:// to ws:// to pass through Railway's proxy firewall
-        uri = f"ws://{host}:{port}"
+        uri = f"wss://{host}:{port}"
         
         while True:
             try:
