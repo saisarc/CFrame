@@ -28,17 +28,28 @@ async def change_status():
 
 @bot.event
 async def on_ready():
-    change_status.start()
-    await bot.add_cog(GameCommands(bot, start_time))
-    await bot.add_cog(DevCommands(bot, start_time))
-    await bot.add_cog(ExtraCommands(bot))
-    await bot.add_cog(Features(bot))
-    await bot.add_cog(Music(bot))
-    synced = await bot.tree.sync()
-    print(f"✅ Bot is online as {bot.user}")
-    print(f"🚀 Synced {len(synced)} slash commands.")
-    print(f"🛠️  Dev prefix commands loaded (prefix: !)")
-    await send_log(bot, "STATUS", f"✅ Bot came **online** as `{bot.user}` — synced {len(synced)} commands.")
+    try:
+        change_status.start()
+        await bot.add_cog(GameCommands(bot, start_time))
+        await bot.add_cog(DevCommands(bot, start_time))
+        await bot.add_cog(ExtraCommands(bot))
+        await bot.add_cog(Features(bot))
+        await bot.add_cog(Music(bot))
+        synced = await bot.tree.sync()
+        print(f"✅ Bot is online as {bot.user}")
+        print(f"🚀 Synced {len(synced)} slash commands.")
+        print(f"🛠️  Dev prefix commands loaded (prefix: !)")
+        await send_log(bot, "STATUS", f"✅ Bot came **online** as `{bot.user}` — synced {len(synced)} commands.")
+    except Exception:
+        import traceback
+        tb = traceback.format_exc()
+        print("Exception in on_ready:\n" + tb)
+        try:
+            await send_log(bot, "CRASH", f"💥 Exception in on_ready:\n```{tb[:1000]}```", error=True)
+        except Exception:
+            pass
+        # Re-raise so the process exits and Railway captures the failure
+        raise
 
 @bot.event
 async def on_disconnect():
