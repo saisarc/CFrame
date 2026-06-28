@@ -57,9 +57,7 @@ class Music(commands.Cog):
         if not interaction.response.is_done():
             await interaction.response.defer()
         await self.connect_node()
-        if not await self.is_node_connected():
-            raise RuntimeError("Could not connect to Lavalink node. Make sure the Lavalink service is running and reachable.")
-
+       
     def get_queue(self, guild_id: int):
         return self.queues.setdefault(guild_id, deque())
 
