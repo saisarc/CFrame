@@ -110,6 +110,13 @@ class Music(commands.Cog):
             voice_client = await self.ensure_voice(interaction)
         except RuntimeError:
             return
+        except Exception as error:
+            # If connecting fails (permissions, network, etc.), report back
+            try:
+                await interaction.followup.send(f"❌ Could not join voice channel: `{error}`")
+            except Exception:
+                pass
+            return
         await interaction.response.send_message(f"✅ Joined **{voice_client.channel.name}**.")
 
     @discord.app_commands.command(name="leave", description="Leave the voice channel")
