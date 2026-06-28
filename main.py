@@ -108,4 +108,18 @@ if __name__ == "__main__":
         else:
             print("ffmpeg: NOT FOUND")
 
-        bot.run(TOKEN)
+        try:
+            bot.run(TOKEN)
+        except Exception:
+            import traceback, time
+            tb = traceback.format_exc()
+            print("Top-level exception while running bot:\n" + tb)
+            # persist debug log so platform logs can surface it or you can download it
+            try:
+                with open('/tmp/cframe-debug.log', 'w') as f:
+                    f.write(tb)
+            except Exception:
+                pass
+            # keep container alive for a while so logs are accessible
+            print("Bot crashed — sleeping for 10 minutes to allow log inspection.")
+            time.sleep(600)
