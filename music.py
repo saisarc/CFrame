@@ -1,19 +1,16 @@
 import asyncio
 import os
+import collections
 from collections import deque
-
 import discord
 from discord.ext import commands
 import wavelink
-
 from commands import blocked, send_log
-
 
 def make_embed(title: str, description: str, color: int = 0x5865F2) -> discord.Embed:
     embed = discord.Embed(title=title, description=description, color=color)
     embed.set_footer(text="CFrame Music (Lavalink)")
     return embed
-
 
 class Music(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -26,8 +23,10 @@ class Music(commands.Cog):
         host = os.getenv("LAVALINK_HOST", "127.0.0.1")
         port = int(os.getenv("LAVALINK_PORT", "2333"))
         password = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
-        uri = f"http://{host}:{port}"
-
+        
+        # UPDATED LINE ONLY: Changed http:// to ws:// to pass through Railway's proxy firewall
+        uri = f"ws://{host}:{port}"
+        
         while True:
             try:
                 node = wavelink.Node(uri=uri, password=password)
@@ -41,7 +40,8 @@ class Music(commands.Cog):
     async def is_node_connected(self) -> bool:
         try:
             node = wavelink.Pool.get_node()
-            return bool(node and getattr(node, "status", None) == "CONNECTED")
+            # UPDATED FOR WAVE_LINK V3+: Checks native .connected attribute safely
+            return bool(node and getattr(node, "connected", False))
         except Exception:
             return False
 
@@ -54,10 +54,8 @@ class Music(commands.Cog):
     async def ensure_lavalink(self, interaction: discord.Interaction):
         if await self.is_node_connected():
             return
-
         if not interaction.response.is_done():
             await interaction.response.defer()
-
         await self.connect_node()
         if not await self.is_node_connected():
             raise RuntimeError("Could not connect to Lavalink node. Make sure the Lavalink service is running and reachable.")
@@ -75,15 +73,13 @@ class Music(commands.Cog):
             except Exception:
                 pass
             raise RuntimeError("user not in voice channel")
-
+            
         channel = interaction.user.voice.channel
         voice_client = interaction.guild.voice_client
         if not voice_client:
-            # connect and use Wavelink player
             player = await channel.connect(cls=wavelink.Player)
             return player
         else:
-            # move if different channel
             if voice_client.channel != channel:
                 await voice_client.move_to(channel)
             return voice_client
@@ -106,7 +102,6 @@ class Music(commands.Cog):
         except Exception as e:
             await self.send_interaction(interaction, f"❌ Could not join voice channel: `{e}`", ephemeral=True)
             return
-
         await self.send_interaction(interaction, f"✅ Joined **{player.channel.name}**")
 
     @discord.app_commands.command(name="leave", description="Leave the voice channel")
@@ -131,7 +126,6 @@ class Music(commands.Cog):
                 await interaction.response.defer()
         except Exception:
             pass
-
         try:
             await self.ensure_lavalink(interaction)
             player = await self.ensure_voice(interaction)
@@ -141,30 +135,29 @@ class Music(commands.Cog):
         except Exception as e:
             await self.send_interaction(interaction, f"❌ Could not join voice channel: `{e}`", ephemeral=True)
             return
-
+            
         try:
-            # search via wavelink
             if query.startswith("http") or query.startswith("https"):
                 search_query = query
             elif query.lower().startswith("ytsearch:"):
                 search_query = query
             else:
                 search_query = f"ytsearch:{query}"
-
+                
             results = await wavelink.Pool.fetch_tracks(search_query)
             track = None
             if isinstance(results, list):
                 track = results[0] if results else None
             else:
                 track = results.tracks[0] if getattr(results, "tracks", None) else None
-
+                
             if not track:
                 if interaction.response.is_done():
                     await interaction.followup.send("❌ No results found.")
                 else:
                     await interaction.response.send_message("❌ No results found.")
                 return
-
+                
             await player.play(track)
         except Exception as error:
             if interaction.response.is_done():
@@ -172,7 +165,7 @@ class Music(commands.Cog):
             else:
                 await interaction.response.send_message(f"❌ Could not play audio: `{error}`")
             return
-
+            
         embed = make_embed("▶️ Now playing", f"**{track.title}**\n{track.uri}")
         try:
             if interaction.response.is_done():
@@ -181,12 +174,10 @@ class Music(commands.Cog):
                 await interaction.response.send_message(embed)
         except Exception as response_error:
             print(f"Failed to finish interaction response: {response_error}")
-            # fallback in case the response state changed unexpectedly
             try:
                 await interaction.followup.send(embed)
             except Exception:
                 pass
-
         await send_log(self.bot, "COMMAND", f"{interaction.user} queued music: `{track.title}`")
 
     @discord.app_commands.command(name="skip", description="Skip the current track")
@@ -235,6 +226,5 @@ class Music(commands.Cog):
         if len(lines) > 10:
             embed.add_field(name="...", value=f"And {len(lines) - 10} more tracks.")
         await interaction.response.send_message(embed=embed)
-
 
 a = Music
