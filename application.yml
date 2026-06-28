@@ -1,5 +1,5 @@
 server:
-  port: 28133
+  port: 2333
 
 lavalink:
   server:
