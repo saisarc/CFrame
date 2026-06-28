@@ -58,7 +58,14 @@ class Music(commands.Cog):
 
     async def ensure_voice(self, interaction: discord.Interaction) -> discord.VoiceClient:
         if not interaction.user.voice or not interaction.user.voice.channel:
-            await interaction.response.send_message("❌ Join a voice channel first.", ephemeral=True)
+            # If we've already acknowledged (deferred), use followup to notify the user
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ Join a voice channel first.", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ Join a voice channel first.", ephemeral=True)
+            except Exception:
+                pass
             raise RuntimeError("user not in voice channel")
 
         channel = interaction.user.voice.channel
