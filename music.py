@@ -45,6 +45,12 @@ class Music(commands.Cog):
         except Exception:
             return False
 
+    async def send_interaction(self, interaction: discord.Interaction, content: str, ephemeral: bool = False):
+        if interaction.response.is_done():
+            await interaction.followup.send(content, ephemeral=ephemeral)
+        else:
+            await interaction.response.send_message(content, ephemeral=ephemeral)
+
     async def ensure_lavalink(self, interaction: discord.Interaction):
         if await self.is_node_connected():
             return
@@ -94,19 +100,14 @@ class Music(commands.Cog):
         try:
             await self.ensure_lavalink(interaction)
             player = await self.ensure_voice(interaction)
-        except RuntimeError:
+        except RuntimeError as e:
+            await self.send_interaction(interaction, f"❌ {e}", ephemeral=True)
             return
         except Exception as e:
-            if interaction.response.is_done():
-                await interaction.followup.send(f"❌ Could not join voice channel: `{e}`", ephemeral=True)
-            else:
-                await interaction.response.send_message(f"❌ Could not join voice channel: `{e}`", ephemeral=True)
+            await self.send_interaction(interaction, f"❌ Could not join voice channel: `{e}`", ephemeral=True)
             return
 
-        if interaction.response.is_done():
-            await interaction.followup.send(f"✅ Joined **{player.channel.name}**")
-        else:
-            await interaction.response.send_message(f"✅ Joined **{player.channel.name}**")
+        await self.send_interaction(interaction, f"✅ Joined **{player.channel.name}**")
 
     @discord.app_commands.command(name="leave", description="Leave the voice channel")
     async def leave(self, interaction: discord.Interaction):
@@ -134,7 +135,11 @@ class Music(commands.Cog):
         try:
             await self.ensure_lavalink(interaction)
             player = await self.ensure_voice(interaction)
-        except RuntimeError:
+        except RuntimeError as e:
+            await self.send_interaction(interaction, f"❌ {e}", ephemeral=True)
+            return
+        except Exception as e:
+            await self.send_interaction(interaction, f"❌ Could not join voice channel: `{e}`", ephemeral=True)
             return
 
         try:
