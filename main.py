@@ -28,28 +28,48 @@ async def change_status():
 
 @bot.event
 async def on_ready():
+    # Start status task and add cogs with per-cog error handling so we can
+    # see which cog (if any) causes startup to fail without the whole process exiting.
+    change_status.start()
+
+    async def safe_add_cog(cog_ctor, *args):
+        name = getattr(cog_ctor, '__name__', str(cog_ctor))
+        print(f"Starting add_cog: {name}")
+        try:
+            await bot.add_cog(cog_ctor(*args))
+            print(f"Finished add_cog: {name}")
+        except Exception:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"Exception while adding cog {name}:\n{tb}")
+            try:
+                await send_log(bot, "CRASH", f"💥 Exception while adding cog {name}:\n```{tb[:1000]}```", error=True)
+            except Exception:
+                pass
+
+    await safe_add_cog(GameCommands, bot, start_time)
+    await safe_add_cog(DevCommands, bot, start_time)
+    await safe_add_cog(ExtraCommands, bot)
+    await safe_add_cog(Features, bot)
+    await safe_add_cog(Music, bot)
+
     try:
-        change_status.start()
-        await bot.add_cog(GameCommands(bot, start_time))
-        await bot.add_cog(DevCommands(bot, start_time))
-        await bot.add_cog(ExtraCommands(bot))
-        await bot.add_cog(Features(bot))
-        await bot.add_cog(Music(bot))
         synced = await bot.tree.sync()
         print(f"✅ Bot is online as {bot.user}")
         print(f"🚀 Synced {len(synced)} slash commands.")
         print(f"🛠️  Dev prefix commands loaded (prefix: !)")
-        await send_log(bot, "STATUS", f"✅ Bot came **online** as `{bot.user}` — synced {len(synced)} commands.")
+        try:
+            await send_log(bot, "STATUS", f"✅ Bot came **online** as `{bot.user}` — synced {len(synced)} commands.")
+        except Exception:
+            pass
     except Exception:
         import traceback
         tb = traceback.format_exc()
-        print("Exception in on_ready:\n" + tb)
+        print("Exception while syncing commands:\n" + tb)
         try:
-            await send_log(bot, "CRASH", f"💥 Exception in on_ready:\n```{tb[:1000]}```", error=True)
+            await send_log(bot, "CRASH", f"💥 Exception while syncing commands:\n```{tb[:1000]}```", error=True)
         except Exception:
             pass
-        # Re-raise so the process exits and Railway captures the failure
-        raise
 
 @bot.event
 async def on_disconnect():
