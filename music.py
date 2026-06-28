@@ -136,7 +136,13 @@ class Music(commands.Cog):
     async def play(self, interaction: discord.Interaction, query: str):
         if await blocked(interaction):
             return
-        await interaction.response.defer()
+        # Defer response only if it hasn't been acknowledged yet
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        except Exception:
+            # If deferring fails, proceed and use followup/send as needed
+            pass
         try:
             voice_client = await self.ensure_voice(interaction)
         except RuntimeError:
