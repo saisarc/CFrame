@@ -58,5 +58,18 @@ if __name__ == "__main__":
     if not TOKEN:
         print("❌ ERROR: DISCORD_TOKEN missing from .env")
     else:
+        import shutil, subprocess
         print("Connecting to Discord...")
+        # Log ffmpeg availability for deployment diagnostics
+        ffmpeg_path = shutil.which("ffmpeg")
+        if ffmpeg_path:
+            try:
+                out = subprocess.check_output([ffmpeg_path, "-version"], stderr=subprocess.STDOUT, text=True)
+                print("ffmpeg detected:")
+                print(out.splitlines()[0])
+            except Exception as e:
+                print(f"ffmpeg present but failed to run: {e}")
+        else:
+            print("ffmpeg: NOT FOUND")
+
         bot.run(TOKEN)
