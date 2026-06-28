@@ -52,7 +52,12 @@ async def on_resumed():
 async def on_error(event, *args, **kwargs):
     import traceback
     err = traceback.format_exc()
-    await send_log(bot, "CRASH", f"💥 Unhandled error in `{event}`:\n```{err[:1000]}```", error=True)
+    # Print traceback to stdout so platform logs capture it as well
+    print(f"Unhandled error in {event}:\n{err}")
+    try:
+        await send_log(bot, "CRASH", f"💥 Unhandled error in `{event}`:\n```{err[:1000]}```", error=True)
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     if not TOKEN:
