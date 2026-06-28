@@ -15,12 +15,13 @@ DEV_ID = int(os.getenv("DEV_ID", "0"))
 ALL_CMDS = [
     "status", "players", "chat", "clearchat", "devlog",
     "updates", "testing", "hype", "countdown", "patchpreview",
-    "help", "serverinfo", "userinfo", "modhelp", "modsettings",
+    "help", "serverinfo", "userinfo", "roadmap", "modhelp", "modsettings",
     "setlogchannel", "clearlogchannel", "setwelcomechannel",
     "setwelcomemessage", "disablewelcome", "welcometest", "warn",
     "warnings", "clearwarnings", "mute", "unmute", "kick", "ban",
     "unban", "clear", "slowmode", "gstart", "gend", "greroll",
-    "level", "leaderboard", "toggleleveling"
+    "level", "leaderboard", "toggleleveling", "toggleantispam",
+    "setantispamthreshold", "autorole", "reactionrole", "dev"
 ]
 
 def dev_only():

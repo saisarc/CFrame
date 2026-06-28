@@ -8,6 +8,7 @@ from commands import GameCommands, send_log
 from dev_commands import DevCommands
 from extra_commands import ExtraCommands
 from features import Features
+from music import Music
 
 load_dotenv()
 TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -32,6 +33,7 @@ async def on_ready():
     await bot.add_cog(DevCommands(bot, start_time))
     await bot.add_cog(ExtraCommands(bot))
     await bot.add_cog(Features(bot))
+    await bot.add_cog(Music(bot))
     synced = await bot.tree.sync()
     print(f"✅ Bot is online as {bot.user}")
     print(f"🚀 Synced {len(synced)} slash commands.")

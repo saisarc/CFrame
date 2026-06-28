@@ -537,12 +537,13 @@ class GameCommands(commands.Cog):
             return
 
         action   = action.lower()
-        all_cmds = ["status", "players", "chat", "clearchat", "devlog", "updates",
-                    "testing", "hype", "countdown", "patchpreview", "help", "serverinfo", "userinfo",
-                    "modhelp", "modsettings", "setlogchannel", "clearlogchannel", "setwelcomechannel",
+        all_cmds = ["status", "players", "chat", "clearchat", "devlog",
+                    "updates", "testing", "hype", "countdown", "patchpreview", "help", "serverinfo", "userinfo",
+                    "roadmap", "modhelp", "modsettings", "setlogchannel", "clearlogchannel", "setwelcomechannel",
                     "setwelcomemessage", "disablewelcome", "welcometest", "warn", "warnings",
                     "clearwarnings", "mute", "unmute", "kick", "ban", "unban", "clear", "slowmode",
-                    "gstart", "gend", "greroll", "level", "leaderboard", "toggleleveling"]
+                    "gstart", "gend", "greroll", "level", "leaderboard", "toggleleveling",
+                    "toggleantispam", "setantispamthreshold", "autorole", "reactionrole"]
 
         if action == "disable":
             if not command or command not in all_cmds:

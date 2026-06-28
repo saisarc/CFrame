@@ -90,7 +90,10 @@ class ExtraCommands(commands.Cog):
         )
         embed.add_field(name="🧭 General", value="`/help`\n`/status`\n`/serverinfo`\n`/userinfo`", inline=True)
         embed.add_field(name="🎮 Roblox", value="`/players`\n`/chat`\n`/lua`\n`/roadmap`", inline=True)
-        embed.add_field(name="🛠️ Staff", value="`/devlog`\n`/updates`\n`/hype`\n`/countdown`\n`/patchpreview`\n`/testing`", inline=False)
+        embed.add_field(name="�️ Server Tools", value="`/modhelp`\n`/modsettings`\n`/setlogchannel`\n`/clearlogchannel`\n`/setwelcomechannel`\n`/setwelcomemessage`\n`/disablewelcome`\n`/welcometest`", inline=False)
+        embed.add_field(name="⚔️ Moderation", value="`/warn`\n`/warnings`\n`/clearwarnings`\n`/mute`\n`/unmute`\n`/kick`\n`/ban`\n`/unban`\n`/clear`\n`/slowmode`", inline=False)
+        embed.add_field(name="🎉 Community", value="`/gstart`\n`/gend`\n`/greroll`\n`/level`\n`/leaderboard`\n`/toggleleveling`\n`/toggleantispam`\n`/setantispamthreshold`\n`/autorole`\n`/reactionrole`", inline=False)
+        embed.add_field(name="🛠️ Staff", value="`/devlog`\n`/updates`\n`/hype`\n`/countdown`\n`/patchpreview`\n`/testing`\n`/dev`", inline=False)
         embed.set_footer(text="CFrame Bot · Help")
         await interaction.response.send_message(embed=embed)
 
