@@ -1,0 +1,24 @@
+server:
+  port: 2333
+
+lavalink:
+  server:
+    password: your_lavalink_password
+    sources:
+      youtube: false
+    bufferDurationMs: 400
+  plugins:
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.1"
+      snapshot: false
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    clients:
+      - MUSIC
+      - ANDROID_VR
+      - WEB
+      - WEBEMBEDDED
