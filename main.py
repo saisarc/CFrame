@@ -14,7 +14,7 @@ load_dotenv()
 TOKEN      = os.getenv("DISCORD_TOKEN")
 start_time = time.time()
 
-status_list = cycle(['beeping booping', 'playing in developer mode', 'My creator's favorite child'])
+status_list = cycle(['Watching beeping booping', 'Playing in developer mode', 'Playing My creator's favorite child'])
 
 intents = discord.Intents.default()
 intents.message_content = True
