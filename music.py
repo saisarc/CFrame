@@ -7,9 +7,12 @@ from discord.ext import commands
 import wavelink
 from commands import blocked, send_log
 
-def make_embed(title: str, description: str, color: int = 0x5865F2) -> discord.Embed:
+def make_embed(title: str, description: str, color: int = 0x2b2d31, thumbnail: str = None) -> discord.Embed:
+    """Creates a sleek, modern Discord embed matching the native dark theme."""
     embed = discord.Embed(title=title, description=description, color=color)
-    embed.set_footer(text="CFrame Music (Lavalink)")
+    if thumbnail:
+        embed.set_thumbnail(url=thumbnail)
+    embed.set_footer(text="CFrame Music • Lavalink")
     return embed
 
 class Music(commands.Cog):
@@ -24,7 +27,6 @@ class Music(commands.Cog):
         port = int(os.getenv("LAVALINK_PORT", "2333"))
         password = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
         
-        # UPDATED LINE ONLY: Changed http:// to ws:// to pass through Railway's proxy firewall
         uri = f"ws://{host}:{port}"
         
         while True:
@@ -40,16 +42,21 @@ class Music(commands.Cog):
     async def is_node_connected(self) -> bool:
         try:
             node = wavelink.Pool.get_node()
-            # UPDATED FOR WAVE_LINK V3+: Checks native .connected attribute safely
             return bool(node and getattr(node, "connected", False))
         except Exception:
             return False
 
-    async def send_interaction(self, interaction: discord.Interaction, content: str, ephemeral: bool = False):
+    async def send_interaction(self, interaction: discord.Interaction, content: str = None, embed: discord.Embed = None, ephemeral: bool = False):
+        kwargs = {"ephemeral": ephemeral}
+        if content:
+            kwargs["content"] = content
+        if embed:
+            kwargs["embed"] = embed
+
         if interaction.response.is_done():
-            await interaction.followup.send(content, ephemeral=ephemeral)
+            await interaction.followup.send(**kwargs)
         else:
-            await interaction.response.send_message(content, ephemeral=ephemeral)
+            await interaction.response.send_message(**kwargs)
 
     async def ensure_lavalink(self, interaction: discord.Interaction):
         if await self.is_node_connected():
@@ -64,10 +71,11 @@ class Music(commands.Cog):
     async def ensure_voice(self, interaction: discord.Interaction):
         if not interaction.user.voice or not interaction.user.voice.channel:
             try:
+                msg = "❌ You must join a voice channel first."
                 if not interaction.response.is_done():
-                    await interaction.response.send_message("❌ Join a voice channel first.", ephemeral=True)
+                    await interaction.response.send_message(msg, ephemeral=True)
                 else:
-                    await interaction.followup.send("❌ Join a voice channel first.", ephemeral=True)
+                    await interaction.followup.send(msg, ephemeral=True)
             except Exception:
                 pass
             raise RuntimeError("user not in voice channel")
@@ -91,16 +99,19 @@ class Music(commands.Cog):
                 await interaction.response.defer()
         except Exception:
             pass
+            
         try:
             await self.ensure_lavalink(interaction)
             player = await self.ensure_voice(interaction)
         except RuntimeError as e:
-            await self.send_interaction(interaction, f"❌ {e}", ephemeral=True)
+            await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
             return
         except Exception as e:
-            await self.send_interaction(interaction, f"❌ Could not join voice channel: `{e}`", ephemeral=True)
+            await self.send_interaction(interaction, content=f"❌ Could not join voice channel: `{e}`", ephemeral=True)
             return
-        await self.send_interaction(interaction, f"✅ Joined **{player.channel.name}**")
+            
+        embed = make_embed("🔊 Connected", f"Bound to voice channel **{player.channel.name}**")
+        await self.send_interaction(interaction, embed=embed)
 
     @discord.app_commands.command(name="leave", description="Leave the voice channel")
     async def leave(self, interaction: discord.Interaction):
@@ -108,11 +119,13 @@ class Music(commands.Cog):
             return
         voice_client = interaction.guild.voice_client
         if not voice_client:
-            await interaction.response.send_message("❌ I'm not in a voice channel.", ephemeral=True)
+            await interaction.response.send_message("❌ I'm currently not in a voice channel.", ephemeral=True)
             return
         await voice_client.disconnect()
         self.queues.pop(interaction.guild.id, None)
-        await interaction.response.send_message("👋 Disconnected from voice.")
+        
+        embed = make_embed("👋 Disconnected", "Successfully cleared the queue and left the channel.")
+        await interaction.response.send_message(embed=embed)
 
     @discord.app_commands.command(name="play", description="Play a song via Lavalink")
     @discord.app_commands.describe(query="YouTube URL or search query")
@@ -124,14 +137,15 @@ class Music(commands.Cog):
                 await interaction.response.defer()
         except Exception:
             pass
+            
         try:
             await self.ensure_lavalink(interaction)
             player = await self.ensure_voice(interaction)
         except RuntimeError as e:
-            await self.send_interaction(interaction, f"❌ {e}", ephemeral=True)
+            await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
             return
         except Exception as e:
-            await self.send_interaction(interaction, f"❌ Could not join voice channel: `{e}`", ephemeral=True)
+            await self.send_interaction(interaction, content=f"❌ Could not join voice channel: `{e}`", ephemeral=True)
             return
             
         try:
@@ -150,32 +164,44 @@ class Music(commands.Cog):
                 track = results.tracks[0] if getattr(results, "tracks", None) else None
                 
             if not track:
-                if interaction.response.is_done():
-                    await interaction.followup.send("❌ No results found.")
-                else:
-                    await interaction.response.send_message("❌ No results found.")
+                await self.send_interaction(interaction, content="❌ No audio tracks found for that query.")
                 return
                 
             await player.play(track)
         except Exception as error:
-            if interaction.response.is_done():
-                await interaction.followup.send(f"❌ Could not play audio: `{error}`")
-            else:
-                await interaction.response.send_message(f"❌ Could not play audio: `{error}`")
+            await self.send_interaction(interaction, content=f"❌ Could not play audio: `{error}`")
             return
             
-        embed = make_embed("▶️ Now playing", f"**{track.title}**\n{track.uri}")
+        # UI Polish: Build a rich 'Now Playing' card
+        artwork = getattr(track, "artwork", None)
+        author = getattr(track, "author", "Unknown Artist")
+        
+        embed = discord.Embed(
+            title="🎧 Now Playing",
+            description=f"**[{track.title}]({track.uri})**",
+            color=0x2b2d31
+        )
+        if artwork:
+            embed.set_thumbnail(url=artwork)
+            
+        embed.add_field(name="Channel / Artist", value=f"`{author}`", inline=True)
+        embed.set_footer(
+            text=f"Requested by {interaction.user.display_name}", 
+            icon_url=interaction.user.display_avatar.url
+        )
+        
         try:
             if interaction.response.is_done():
-                await interaction.followup.send(embed)
+                await interaction.followup.send(embed=embed)
             else:
-                await interaction.response.send_message(embed)
+                await interaction.response.send_message(embed=embed)
         except Exception as response_error:
             print(f"Failed to finish interaction response: {response_error}")
             try:
-                await interaction.followup.send(embed)
+                await interaction.followup.send(embed=embed)
             except Exception:
                 pass
+                
         await send_log(self.bot, "COMMAND", f"{interaction.user} queued music: `{track.title}`")
 
     @discord.app_commands.command(name="skip", description="Skip the current track")
@@ -184,10 +210,11 @@ class Music(commands.Cog):
             return
         player = interaction.guild.voice_client
         if not player or not player.is_playing():
-            await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
+            await interaction.response.send_message("❌ Nothing is currently playing.", ephemeral=True)
             return
         await player.stop()
-        await interaction.response.send_message("⏭️ Skipped the current track.")
+        embed = make_embed("⏭️ Track Skipped", "Skipped to the next available track in the queue.")
+        await interaction.response.send_message(embed=embed)
 
     @discord.app_commands.command(name="pause", description="Pause playback")
     async def pause(self, interaction: discord.Interaction):
@@ -198,7 +225,8 @@ class Music(commands.Cog):
             await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
             return
         await player.pause()
-        await interaction.response.send_message("⏸️ Paused.")
+        embed = make_embed("⏸️ Paused", "Playback has been suspended. Use `/resume` to continue.")
+        await interaction.response.send_message(embed=embed)
 
     @discord.app_commands.command(name="resume", description="Resume playback")
     async def resume(self, interaction: discord.Interaction):
@@ -206,10 +234,11 @@ class Music(commands.Cog):
             return
         player = interaction.guild.voice_client
         if not player or not player.is_paused():
-            await interaction.response.send_message("❌ Nothing is paused.", ephemeral=True)
+            await interaction.response.send_message("❌ The player is not paused.", ephemeral=True)
             return
         await player.resume()
-        await interaction.response.send_message("▶️ Resumed playback.")
+        embed = make_embed("▶️ Resumed", "Audio playback has resumed.")
+        await interaction.response.send_message(embed=embed)
 
     @discord.app_commands.command(name="queue", description="Show the current music queue")
     async def queue(self, interaction: discord.Interaction):
@@ -217,12 +246,16 @@ class Music(commands.Cog):
             return
         queue = self.get_queue(interaction.guild.id)
         if not queue:
-            await interaction.response.send_message("✅ The queue is empty.", ephemeral=True)
+            await interaction.response.send_message("☕ **The queue is completely empty.**", ephemeral=True)
             return
-        lines = [f"{idx + 1}. {item.title}" for idx, item in enumerate(queue)]
-        embed = make_embed("📜 Queue", "\n".join(lines[:10]))
+            
+        lines = [f"`{idx + 1}.` **{item.title}**" for idx, item in enumerate(queue)]
+        embed = make_embed("📜 Upcoming Tracks", "\n".join(lines[:10]))
+        
         if len(lines) > 10:
-            embed.add_field(name="...", value=f"And {len(lines) - 10} more tracks.")
+            embed.add_field(name="Remaining", value=f"*...and {len(lines) - 10} more tracks waiting.*", inline=False)
+            
         await interaction.response.send_message(embed=embed)
 
-a = Music
+async def setup(bot):
+    await bot.add_cog(Music(bot))
