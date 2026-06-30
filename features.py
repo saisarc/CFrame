@@ -90,21 +90,72 @@ async def _maybe_sync_state(kind: str, guild_id: int, payload):
         return
 
 
+async def load_guild_settings(guild_id: int):
+    """Load guild settings from Mongo when configured; otherwise use in-memory/local fallback."""
+    default_settings = {
+        "log_channel_id": None,
+        "welcome_enabled": False,
+        "welcome_channel_id": None,
+        "welcome_message": "Welcome {mention} to {server}! We now have {member_count} members.",
+        "leveling_enabled": True,
+        "anti_spam_enabled": False,
+        "anti_spam_threshold": 5,
+        "anti_spam_window": 10,
+        "auto_role_ids": [],
+    }
+
+    gid = str(guild_id)
+
+    # Mongo path
+    if os.getenv("MONGODB_URI"):
+        try:
+            # MongoPersistence returns dict
+            settings = await mongo.get_guild_settings(guild_id)
+            merged = default_settings | (settings or {})
+            # keep in-memory copy so existing handlers can read synchronously
+            state["guild_settings"][gid] = merged
+            return merged
+        except Exception:
+            # fall back to whatever we have in memory
+            pass
+
+    # Fallback path
+    settings = state["guild_settings"].setdefault(gid, default_settings.copy())
+    return settings
+
+
+async def save_guild_settings(guild_id: int, settings: dict):
+    """Persist guild settings to Mongo when configured; always update in-memory cache."""
+    gid = str(guild_id)
+    state["guild_settings"][gid] = settings
+
+    if os.getenv("MONGODB_URI"):
+        try:
+            await mongo.set_guild_settings(guild_id, settings)
+        except Exception:
+            # avoid crashing moderation features if DB is temporarily down
+            return
+
+
 def save_state():
     """Persist to Mongo/local file.
 
     Chat history and XP leveling are intentionally NOT persisted.
-    """
-    if os.getenv("MONGODB_URI"):
-        # Mongo persistence is handled via async writers elsewhere.
-        return
-    _save_state_file()
 
+    Note: moderation persistence is handled by save_guild_settings()/Mongo, not this function.
+    """
+    if not os.getenv("MONGODB_URI"):
+        _save_state_file()
 
 
 def get_guild_settings(guild_id):
+    """Synchronous getter for current cached guild settings.
+
+    If Mongo is enabled and the cache is empty, call load_guild_settings(guild_id)
+    before using this.
+    """
     gid = str(guild_id)
-    settings = state["guild_settings"].setdefault(
+    return state["guild_settings"].setdefault(
         gid,
         {
             "log_channel_id": None,
@@ -118,7 +169,7 @@ def get_guild_settings(guild_id):
             "auto_role_ids": [],
         },
     )
-    return settings
+
 
 
 def get_user_xp(guild_id, user_id):
@@ -168,6 +219,7 @@ class Features(commands.Cog):
         self.bot = bot
         self.level_task.start()
         self.giveaway_task.start()
+
 
     def cog_unload(self):
         self.level_task.cancel()
@@ -219,8 +271,13 @@ class Features(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _send_log(self, guild_id, title, description, color=0x5865F2):
+        # Ensure cache is populated from Mongo (if enabled) before reading log_channel_id
+        if os.getenv("MONGODB_URI"):
+            await load_guild_settings(int(guild_id))
         settings = get_guild_settings(guild_id)
+
         log_channel_id = settings.get("log_channel_id")
+
         if not log_channel_id:
             return
         guild = self.bot.get_guild(int(guild_id))
@@ -449,14 +506,16 @@ class Features(commands.Cog):
     @discord.app_commands.command(name="setlogchannel", description="Set the channel where moderation logs will be sent")
     @discord.app_commands.describe(channel="The channel to use for logs")
     async def setlogchannel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+
         if await blocked(interaction):
             return
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need Manage Server permissions.", ephemeral=True)
             return
-        settings = get_guild_settings(interaction.guild_id)
+        settings = await load_guild_settings(interaction.guild_id)
         settings["log_channel_id"] = channel.id
-        save_state()
+        await save_guild_settings(interaction.guild_id, settings)
+
         await interaction.response.send_message(f"✅ Log channel set to {channel.mention}.", ephemeral=True)
         await send_log(self.bot, "STATUS", f"{interaction.user} set the log channel to {channel.mention}.")
 
@@ -467,9 +526,10 @@ class Features(commands.Cog):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need Manage Server permissions.", ephemeral=True)
             return
-        settings = get_guild_settings(interaction.guild_id)
+        settings = await load_guild_settings(interaction.guild_id)
         settings["log_channel_id"] = None
-        save_state()
+        await save_guild_settings(interaction.guild_id, settings)
+
         await interaction.response.send_message("✅ Logging has been disabled for this server.", ephemeral=True)
 
     @discord.app_commands.command(name="setwelcomechannel", description="Set the welcome message channel")
