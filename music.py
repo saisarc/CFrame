@@ -298,13 +298,28 @@ class Music(commands.Cog):
 
         # If the bot is not currently playing, play immediately; otherwise enqueue.
         # wavelink.Player API differs by version; avoid calling methods that don't exist.
-        is_playing = getattr(player, "is_playing", None)
+        # Prefer Lavalink's state attributes; fall back safely.
+        is_playing_fn = getattr(player, "is_playing", None)
+        is_paused_fn = getattr(player, "is_paused", None)
+
         should_play_now = True
-        if callable(is_playing):
+        if callable(is_playing_fn):
             try:
-                should_play_now = not bool(is_playing())
+                should_play_now = not bool(is_playing_fn())
             except Exception:
                 should_play_now = True
+        else:
+            # Some wavelink versions expose playback state differently.
+            paused = False
+            if callable(is_paused_fn):
+                try:
+                    paused = bool(is_paused_fn())
+                except Exception:
+                    paused = False
+
+            # If we can't detect playing, but there's already something in the queue,
+            # treat this as "enqueue" behavior.
+            should_play_now = not bool(q) and not paused
 
         item = {
             "track": track,
@@ -369,8 +384,8 @@ class Music(commands.Cog):
         if await blocked(interaction):
             return
         player = interaction.guild.voice_client
-        is_playing = getattr(player, "is_playing", None) if player else None
-        if not player or not callable(is_playing) or not is_playing():
+        is_playing_fn = getattr(player, "is_playing", None) if player else None
+        if not player or not callable(is_playing_fn) or not is_playing_fn():
             await interaction.response.send_message("❌ Nothing is currently playing.", ephemeral=True)
             return
         try:
