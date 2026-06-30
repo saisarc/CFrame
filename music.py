@@ -142,12 +142,22 @@ class Music(commands.Cog):
                     if not isinstance(player, wavelink.Player):
                         continue
 
-                    if player.is_playing():
-                        continue
+                    # wavelink.Player API differs by version; only use methods if they exist.
+                    is_playing = getattr(player, "is_playing", None)
+                    if callable(is_playing):
+                        try:
+                            if player.is_playing():
+                                continue
+                        except Exception:
+                            pass
 
-                    # If paused, don't auto-advance.
-                    if player.is_paused():
-                        continue
+                    is_paused = getattr(player, "is_paused", None)
+                    if callable(is_paused):
+                        try:
+                            if player.is_paused():
+                                continue
+                        except Exception:
+                            pass
 
                     # If nothing is queued, do nothing.
                     if not q:
@@ -287,9 +297,14 @@ class Music(commands.Cog):
         q = self.get_queue(guild_id)
 
         # If the bot is not currently playing, play immediately; otherwise enqueue.
-        was_playing = player.is_playing() or (not player.is_paused() and player.is_playing() is False)
-        # Better rule: if Lavalink thinks it's playing, treat as active.
-        should_play_now = not player.is_playing()
+        # wavelink.Player API differs by version; avoid calling methods that don't exist.
+        is_playing = getattr(player, "is_playing", None)
+        should_play_now = True
+        if callable(is_playing):
+            try:
+                should_play_now = not bool(is_playing())
+            except Exception:
+                should_play_now = True
 
         item = {
             "track": track,
@@ -354,7 +369,8 @@ class Music(commands.Cog):
         if await blocked(interaction):
             return
         player = interaction.guild.voice_client
-        if not player or not player.is_playing():
+        is_playing = getattr(player, "is_playing", None) if player else None
+        if not player or not callable(is_playing) or not is_playing():
             await interaction.response.send_message("❌ Nothing is currently playing.", ephemeral=True)
             return
         try:
