@@ -90,13 +90,13 @@ async def _maybe_sync_state(kind: str, guild_id: int, payload):
         return
 
 
-def _save_state():
-    """Persist to Mongo for moderation/settings only.
+def save_state():
+    """Persist to Mongo/local file.
 
     Chat history and XP leveling are intentionally NOT persisted.
     """
     if os.getenv("MONGODB_URI"):
-        # no-op: async handlers persist only supported kinds
+        # Mongo persistence is handled via async writers elsewhere.
         return
     _save_state_file()
 
