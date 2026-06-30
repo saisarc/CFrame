@@ -18,8 +18,21 @@ def make_embed(title: str, description: str, color: int = 0x2b2d31, thumbnail: s
 class Music(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.queues = {}
+
+        # guild_id -> deque[ dict(track=..., title=..., uri=..., requester_id=..., requester_name=...) ]
+        self.queues: dict[int, deque] = {}
+
+        # guild_id -> player state
+        # { voice_channel_name: original name, voice_status_enabled: bool, voice_status_suffix: str }
+        self.voice_status: dict[int, dict] = {}
+
+        # config
+        self.repeat_modes = {}  # guild_id -> 'off'|'one'|'all'
+        self.volumes = {}       # guild_id -> int
+
         bot.loop.create_task(self.connect_node())
+        bot.loop.create_task(self.queue_worker())
+
 
     async def connect_node(self):
         await self.bot.wait_until_ready()
@@ -67,6 +80,97 @@ class Music(commands.Cog):
        
     def get_queue(self, guild_id: int):
         return self.queues.setdefault(guild_id, deque())
+
+    def _get_voice_channel_and_store_original(self, guild: discord.Guild, voice_channel: discord.VoiceChannel):
+        st = self.voice_status.setdefault(guild.id, {})
+        if "original_name" not in st:
+            st["original_name"] = voice_channel.name
+        if "voice_status_enabled" not in st:
+            st["voice_status_enabled"] = False
+        if "voice_status_suffix" not in st:
+            st["voice_status_suffix"] = "🎵 {title}"
+        return st
+
+    async def _update_voice_status(self, player: wavelink.Player, track_title: str):
+        guild = player.guild
+        voice_client = guild.voice_client
+        if not voice_client or not voice_client.channel:
+            return
+
+        st = self.voice_status.get(guild.id)
+        if not st or not st.get("voice_status_enabled"):
+            return
+
+        channel = voice_client.channel
+        suffix = st.get("voice_status_suffix") or "🎵 {title}"
+        # Discord channel name limit is 100 characters.
+        new_name = f"{st.get('original_name', channel.name)} | {suffix.replace('{title}', track_title)}"
+        if len(new_name) > 100:
+            new_name = new_name[:97] + "..."
+
+        try:
+            if channel.name != new_name:
+                await channel.edit(name=new_name)
+        except Exception:
+            pass
+
+    async def _restore_voice_status(self, guild: discord.Guild):
+        st = self.voice_status.get(guild.id)
+        if not st:
+            return
+        voice_client = guild.voice_client
+        if not voice_client or not voice_client.channel:
+            return
+        original = st.get("original_name")
+        if not original:
+            return
+        try:
+            if voice_client.channel.name != original:
+                await voice_client.channel.edit(name=original)
+        except Exception:
+            pass
+
+    async def queue_worker(self):
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                for guild_id, q in list(self.queues.items()):
+                    guild = self.bot.get_guild(guild_id)
+                    if not guild or not guild.voice_client:
+                        continue
+                    player = guild.voice_client
+                    if not isinstance(player, wavelink.Player):
+                        continue
+
+                    if player.is_playing():
+                        continue
+
+                    # If paused, don't auto-advance.
+                    if player.is_paused():
+                        continue
+
+                    # If nothing is queued, do nothing.
+                    if not q:
+                        # repeat-all doesn't apply unless we have something to repeat.
+                        continue
+
+                    next_item = q.popleft()
+                    track = next_item.get("track")
+                    if not track:
+                        continue
+
+                    await player.play(track)
+
+                    # update status once playback starts
+                    title = next_item.get("title") or getattr(track, "title", "Unknown")
+                    await self._update_voice_status(player, title)
+                    await send_log(self.bot, "COMMAND", f"Now playing (queue): `{title}`")
+
+            except Exception:
+                pass
+
+            await asyncio.sleep(1)
+
 
     async def ensure_voice(self, interaction: discord.Interaction):
         if not interaction.user.voice or not interaction.user.voice.channel:
@@ -127,9 +231,11 @@ class Music(commands.Cog):
         embed = make_embed("👋 Disconnected", "Successfully cleared the queue and left the channel.")
         await interaction.response.send_message(embed=embed)
 
-    @discord.app_commands.command(name="play", description="Play a song via Lavalink")
-    @discord.app_commands.describe(query="YouTube URL or search query")
+    @discord.app_commands.command(name="play", description="Play a song via Lavalink (adds to queue)")
+    @discord.app_commands.describe(query="YouTube URL/search, or an audio URL/URI supported by your Lavalink plugins")
     async def play(self, interaction: discord.Interaction, query: str):
+
+
         if await blocked(interaction):
             return
         try:
@@ -148,48 +254,83 @@ class Music(commands.Cog):
             await self.send_interaction(interaction, content=f"❌ Could not join voice channel: `{e}`", ephemeral=True)
             return
             
+        # Resolve track via Lavalink.
         try:
             if query.startswith("http") or query.startswith("https"):
                 search_query = query
             elif query.lower().startswith("ytsearch:"):
                 search_query = query
+            elif query.lower().startswith(("spotify:", "appl:", "apple:", "soundcloud:", "bandcamp:", "twitch:")):
+                # Pass-through for lavalink plugins that support these URL schemes.
+                search_query = query
+
             else:
+
+                # Default: YouTube search
                 search_query = f"ytsearch:{query}"
-                
+
             results = await wavelink.Pool.fetch_tracks(search_query)
             track = None
             if isinstance(results, list):
                 track = results[0] if results else None
             else:
                 track = results.tracks[0] if getattr(results, "tracks", None) else None
-                
+
             if not track:
                 await self.send_interaction(interaction, content="❌ No audio tracks found for that query.")
                 return
-                
-            await player.play(track)
         except Exception as error:
             await self.send_interaction(interaction, content=f"❌ Could not play audio: `{error}`")
             return
-            
-        # UI Polish: Build a rich 'Now Playing' card
+
+        guild_id = interaction.guild.id
+        q = self.get_queue(guild_id)
+
+        # If the bot is not currently playing, play immediately; otherwise enqueue.
+        was_playing = player.is_playing() or (not player.is_paused() and player.is_playing() is False)
+        # Better rule: if Lavalink thinks it's playing, treat as active.
+        should_play_now = not player.is_playing()
+
+        item = {
+            "track": track,
+            "title": getattr(track, "title", "Unknown"),
+            "uri": getattr(track, "uri", None),
+            "requester_id": interaction.user.id,
+            "requester_name": interaction.user.display_name,
+        }
+
+        if should_play_now and not q:
+            await player.play(track)
+            title = item["title"]
+            # store original channel name if voice status is enabled
+            try:
+                self._get_voice_channel_and_store_original(interaction.guild, player.channel)
+            except Exception:
+                pass
+            await self._update_voice_status(player, title)
+            status_text = "Now playing"
+        else:
+            q.append(item)
+            status_text = "Added to queue"
+
+        # UI Polish: rich card
         artwork = getattr(track, "artwork", None)
         author = getattr(track, "author", "Unknown Artist")
-        
+
         embed = discord.Embed(
-            title="🎧 Now Playing",
-            description=f"**[{track.title}]({track.uri})**",
-            color=0x2b2d31
+            title=f"🎧 {status_text}" if status_text != "Added to queue" else "📥 Added to Queue",
+            description=f"**[{item['title']}]({item['uri']})**" if item.get("uri") else f"**{item['title']}**",
+            color=0x2b2d31,
         )
         if artwork:
             embed.set_thumbnail(url=artwork)
-            
+
         embed.add_field(name="Channel / Artist", value=f"`{author}`", inline=True)
         embed.set_footer(
-            text=f"Requested by {interaction.user.display_name}", 
-            icon_url=interaction.user.display_avatar.url
+            text=f"Requested by {interaction.user.display_name}",
+            icon_url=interaction.user.display_avatar.url,
         )
-        
+
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(embed=embed)
@@ -201,20 +342,32 @@ class Music(commands.Cog):
                 await interaction.followup.send(embed=embed)
             except Exception:
                 pass
-                
-        await send_log(self.bot, "COMMAND", f"{interaction.user} queued music: `{track.title}`")
+
+        await send_log(self.bot, "COMMAND", f"{interaction.user} {status_text.lower()}: `{item['title']}`")
+
 
     @discord.app_commands.command(name="skip", description="Skip the current track")
-    async def skip(self, interaction: discord.Interaction):
+    @discord.app_commands.describe(reason="Skip reason (optional)")
+
+    async def skip(self, interaction: discord.Interaction, reason: str = None):
+
         if await blocked(interaction):
             return
         player = interaction.guild.voice_client
         if not player or not player.is_playing():
             await interaction.response.send_message("❌ Nothing is currently playing.", ephemeral=True)
             return
-        await player.stop()
-        embed = make_embed("⏭️ Track Skipped", "Skipped to the next available track in the queue.")
+        try:
+            await player.stop()
+        except Exception:
+            # ignore stop errors, queue worker will handle next
+            pass
+        embed = make_embed(
+            "⏭️ Track Skipped",
+            f"Skipped. {('Reason: ' + reason) if reason else ''}".strip(),
+        )
         await interaction.response.send_message(embed=embed)
+
 
     @discord.app_commands.command(name="pause", description="Pause playback")
     async def pause(self, interaction: discord.Interaction):
@@ -240,8 +393,55 @@ class Music(commands.Cog):
         embed = make_embed("▶️ Resumed", "Audio playback has resumed.")
         await interaction.response.send_message(embed=embed)
 
+    @discord.app_commands.command(name="voiceupdate", description="Auto-rename the bot's connected voice channel to match the current song")
+    @discord.app_commands.describe(suffix="Rename template. Use {title} for the song title")
+    async def voiceupdate(self, interaction: discord.Interaction, suffix: str = "🎵 {title}"):
+        if await blocked(interaction):
+            return
+
+        # Require bot to be in voice
+        voice_client = interaction.guild.voice_client
+        if not voice_client or not voice_client.channel:
+            await interaction.response.send_message("❌ I'm not connected to a voice channel.", ephemeral=True)
+            return
+
+        # store original name
+        st = self._get_voice_channel_and_store_original(interaction.guild, voice_client.channel)
+        st["voice_status_enabled"] = True
+        if suffix:
+            st["voice_status_suffix"] = suffix
+        await self._restore_voice_status(interaction.guild)  # normalize before applying
+
+        # if currently playing, update immediately
+        try:
+            if voice_client.is_playing():
+                title = getattr(getattr(voice_client, "track", None), "title", None) or "Unknown"
+                await self._update_voice_status(voice_client, title)
+        except Exception:
+            pass
+
+        await interaction.response.send_message(
+            f"✅ Voice channel status updates enabled. Template: `{suffix}`",
+            ephemeral=True,
+        )
+
+    @discord.app_commands.command(name="voiceupdatedisable", description="Disable auto-rename and restore the original voice channel name")
+    async def voiceupdatedisable(self, interaction: discord.Interaction):
+        if await blocked(interaction):
+            return
+        if interaction.guild.id not in self.voice_status:
+            await interaction.response.send_message("✅ Voice channel status is already disabled.", ephemeral=True)
+            return
+
+        st = self.voice_status[interaction.guild.id]
+        st["voice_status_enabled"] = False
+        await self._restore_voice_status(interaction.guild)
+        await interaction.response.send_message("✅ Restored original voice channel name.", ephemeral=True)
+
     @discord.app_commands.command(name="queue", description="Show the current music queue")
+
     async def queue(self, interaction: discord.Interaction):
+
         if await blocked(interaction):
             return
         queue = self.get_queue(interaction.guild.id)
@@ -249,7 +449,11 @@ class Music(commands.Cog):
             await interaction.response.send_message("☕ **The queue is completely empty.**", ephemeral=True)
             return
             
-        lines = [f"`{idx + 1}.` **{item.title}**" for idx, item in enumerate(queue)]
+        lines = []
+        for idx, item in enumerate(queue):
+            title = item.get("title") or getattr(item.get("track"), "title", "Unknown")
+            lines.append(f"`{idx + 1}.` **{title}**")
+
         embed = make_embed("📜 Upcoming Tracks", "\n".join(lines[:10]))
         
         if len(lines) > 10:

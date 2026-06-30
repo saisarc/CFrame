@@ -9,8 +9,12 @@ import discord
 from discord.ext import commands, tasks
 
 from commands import blocked, disabled_cmds, send_log
+from persistence_mongo import MongoPersistence
 
-DATA_FILE = os.path.join(os.path.dirname(__file__), "bot_data.json")
+
+# ---- local fallback (optional) ----
+# The bot historically used bot_data.json.
+# With MongoDB enabled, we keep this state in-memory and persist only selected parts.
 
 
 def _default_state():
@@ -27,7 +31,11 @@ def _default_state():
 state = _default_state()
 
 
-def load_state():
+# If Mongo is not configured, we still allow local JSON persistence.
+DATA_FILE = os.path.join(os.path.dirname(__file__), "bot_data.json")
+
+
+def _load_state_file():
     global state
     if os.path.exists(DATA_FILE):
         try:
@@ -39,21 +47,59 @@ def load_state():
     else:
         state = _default_state()
 
-    state.setdefault("guild_settings", {})
-    state.setdefault("xp_data", {})
-    state.setdefault("warnings", {})
-    state.setdefault("giveaways", {})
-    state.setdefault("anti_spam", {})
-    state.setdefault("reaction_roles", {})
-    save_state()
+    for k in ("guild_settings", "xp_data", "warnings", "giveaways", "anti_spam", "reaction_roles"):
+        state.setdefault(k, {})
+
+# MongoPersistence loads/saves only supported subsets.
+# We intentionally do NOT persist chat history, and we only persist xp_state if you later enable it.
 
 
-def save_state():
+
+def _save_state_file():
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
 
 
-load_state()
+_load_state_file()
+
+
+mongo = MongoPersistence()
+
+
+async def _maybe_sync_state(kind: str, guild_id: int, payload):
+
+
+    """Write selected state to MongoDB.
+
+    kind: one of guild_settings|warnings|giveaways|reaction_roles
+    """
+    # If Mongo isn't configured, just keep legacy local JSON behavior.
+    try:
+        if not os.getenv("MONGODB_URI"):
+            return
+        if kind == "guild_settings":
+            await mongo.set_guild_settings(guild_id, payload)
+        elif kind == "warnings":
+            await mongo.set_warnings(guild_id, payload)
+        elif kind == "giveaways":
+            await mongo.set_giveaways(guild_id, payload)
+        elif kind == "reaction_roles":
+            await mongo.set_reaction_roles(guild_id, payload)
+    except Exception:
+        # Avoid crashing moderation features if DB is temporarily down.
+        return
+
+
+def _save_state():
+    """Persist to Mongo for moderation/settings only.
+
+    Chat history and XP leveling are intentionally NOT persisted.
+    """
+    if os.getenv("MONGODB_URI"):
+        # no-op: async handlers persist only supported kinds
+        return
+    _save_state_file()
+
 
 
 def get_guild_settings(guild_id):
@@ -76,6 +122,7 @@ def get_guild_settings(guild_id):
 
 
 def get_user_xp(guild_id, user_id):
+
     gid = str(guild_id)
     uid = str(user_id)
     guild_xp = state["xp_data"].setdefault(gid, {})
@@ -155,7 +202,9 @@ class Features(commands.Cog):
                             await channel.send(embed=embed)
                     giveaway["ended"] = True
                     giveaway["winner_ids"] = giveaway.get("participants", [])
-                    save_state()
+                    # Mongo disabled: keep giveaways in-memory + local file only.
+                    _save_state()
+
 
     @giveaway_task.before_loop
     async def before_giveaway(self):
@@ -312,39 +361,90 @@ class Features(commands.Cog):
             user_data["level"] += 1
         save_state()
 
-    @discord.app_commands.command(name="modhelp", description="Show moderation and server management commands")
+    # ── /moderation — NEW Advanced overview & settings hub ─────────────────
+    @discord.app_commands.command(
+        name="moderation",
+        description="Advanced moderation & server settings (overview / configure)"
+    )
+    @discord.app_commands.describe(
+        action="overview, logging, welcome, antispam, leveling"
+    )
+    async def moderation(self, interaction: discord.Interaction, action: str):
+        if await blocked(interaction):
+            return
+
+        action = (action or "overview").lower()
+        settings = get_guild_settings(interaction.guild_id)
+
+        if action == "overview":
+            log_channel = interaction.guild.get_channel(int(settings["log_channel_id"])) if settings.get("log_channel_id") else None
+            welcome_channel = interaction.guild.get_channel(int(settings["welcome_channel_id"])) if settings.get("welcome_channel_id") else None
+
+            embed = discord.Embed(title="🛡️ Moderation Overview", color=0x5865F2)
+            embed.add_field(name="Logging", value=log_channel.mention if log_channel else "Not set", inline=False)
+            embed.add_field(name="Welcome", value=("Enabled" if settings.get("welcome_enabled") else "Disabled") + (f" • {welcome_channel.mention}" if settings.get("welcome_channel_id") and welcome_channel else ""), inline=False)
+            embed.add_field(name="Anti-Spam", value=("Enabled" if settings.get("anti_spam_enabled") else "Disabled") + f" • threshold {settings.get('anti_spam_threshold', 5)}", inline=False)
+            embed.add_field(name="Leveling", value="Enabled" if settings.get("leveling_enabled") else "Disabled", inline=False)
+            embed.add_field(name="Auto Roles", value=str(len(settings.get("auto_role_ids", []))) if settings.get("auto_role_ids") else "None", inline=False)
+            embed.set_footer(text="CFrame Bot · Moderation")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # LOGGING
+        if action == "logging":
+            log_channel = interaction.guild.get_channel(int(settings["log_channel_id"])) if settings.get("log_channel_id") else None
+            embed = discord.Embed(title="🧾 Logging Settings", color=0x5865F2)
+            embed.add_field(name="Log Channel", value=log_channel.mention if log_channel else "Not set", inline=False)
+            embed.add_field(name="Use", value="`/setlogchannel` or `/clearlogchannel`", inline=False)
+            embed.set_footer(text="CFrame Bot · Moderation")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # WELCOME
+        if action == "welcome":
+            welcome_channel = interaction.guild.get_channel(int(settings["welcome_channel_id"])) if settings.get("welcome_channel_id") else None
+            embed = discord.Embed(title="👋 Welcome Settings", color=0x5865F2)
+            embed.add_field(name="Enabled", value="Yes" if settings.get("welcome_enabled") else "No", inline=True)
+            embed.add_field(name="Channel", value=welcome_channel.mention if welcome_channel else "Not set", inline=True)
+            embed.add_field(name="Message", value=settings.get("welcome_message", "Not set")[:500], inline=False)
+            embed.set_footer(text="CFrame Bot · Moderation")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # ANTI-SPAM
+        if action == "antispam":
+            embed = discord.Embed(title="🚨 Anti-Spam Settings", color=0x5865F2)
+            embed.add_field(name="Enabled", value="Yes" if settings.get("anti_spam_enabled") else "No", inline=True)
+            embed.add_field(name="Threshold", value=str(settings.get("anti_spam_threshold", 5)), inline=True)
+            embed.set_footer(text="CFrame Bot · Moderation")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # LEVELING
+        if action == "leveling":
+            embed = discord.Embed(title="📈 Leveling Settings", color=0x5865F2)
+            embed.add_field(name="Enabled", value="Yes" if settings.get("leveling_enabled") else "No", inline=True)
+            embed.set_footer(text="CFrame Bot · Moderation")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        await interaction.response.send_message("❌ Unknown action. Use: overview, logging, welcome, antispam, leveling", ephemeral=True)
+
+    # ── Backwards-compatible commands (kept) ────────────────────────────────
+    # /modhelp and /modsettings are deprecated; use /moderation instead.
+
+    @discord.app_commands.command(name="modhelp", description="(Deprecated) Show moderation and server management commands")
     async def modhelp(self, interaction: discord.Interaction):
         if await blocked(interaction):
             return
-        embed = discord.Embed(title="🛡️ Moderation & Server Tools", color=0x5865F2)
-        embed.add_field(name="Logging", value="`/setlogchannel` • `/clearlogchannel` • `/modsettings`", inline=False)
-        embed.add_field(name="Welcome", value="`/setwelcomechannel` • `/setwelcomemessage` • `/disablewelcome` • `/welcometest`", inline=False)
-        embed.add_field(name="Moderation", value="`/warn` • `/warnings` • `/clearwarnings` • `/mute` • `/unmute` • `/kick` • `/ban` • `/unban` • `/clear` • `/slowmode`", inline=False)
-        embed.add_field(name="Giveaways", value="`/gstart` • `/gend` • `/greroll`", inline=False)
-        embed.add_field(name="Leveling", value="`/level` • `/leaderboard` • `/toggleleveling`", inline=False)
-        embed.add_field(name="Anti-Spam", value="`/toggleantispam` • `/setantispamthreshold`", inline=False)
-        embed.add_field(name="Reaction Roles", value="`/reactionrole` • `/autorole`", inline=False)
-        embed.set_footer(text="CFrame Bot · Server Tools")
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message("Use `/moderation overview` for the new advanced hub.", ephemeral=True)
 
-    @discord.app_commands.command(name="modsettings", description="Show the current moderation and welcome settings")
+    @discord.app_commands.command(name="modsettings", description="(Deprecated) Show the current moderation and welcome settings")
     async def modsettings(self, interaction: discord.Interaction):
         if await blocked(interaction):
             return
-        settings = get_guild_settings(interaction.guild_id)
-        log_channel = interaction.guild.get_channel(int(settings["log_channel_id"])) if settings.get("log_channel_id") else None
-        welcome_channel = interaction.guild.get_channel(int(settings["welcome_channel_id"])) if settings.get("welcome_channel_id") else None
-        embed = discord.Embed(title="⚙️ Server Settings", color=0x5865F2)
-        embed.add_field(name="Log Channel", value=log_channel.mention if log_channel else "Not set", inline=True)
-        embed.add_field(name="Welcome Enabled", value="Yes" if settings.get("welcome_enabled") else "No", inline=True)
-        embed.add_field(name="Welcome Channel", value=welcome_channel.mention if welcome_channel else "Not set", inline=True)
-        embed.add_field(name="Leveling Enabled", value="Yes" if settings.get("leveling_enabled") else "No", inline=True)
-        embed.add_field(name="Anti-Spam Enabled", value="Yes" if settings.get("anti_spam_enabled") else "No", inline=True)
-        embed.add_field(name="Anti-Spam Threshold", value=str(settings.get("anti_spam_threshold", 5)), inline=True)
-        embed.add_field(name="Auto Roles", value=str(len(settings.get("auto_role_ids", []))) if settings.get("auto_role_ids") else "None", inline=True)
-        embed.add_field(name="Welcome Message", value=settings.get("welcome_message", "Not set")[:500], inline=False)
-        embed.set_footer(text="CFrame Bot · Settings")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message("Use `/moderation overview` for the new advanced hub.", ephemeral=True)
+
 
     @discord.app_commands.command(name="setlogchannel", description="Set the channel where moderation logs will be sent")
     @discord.app_commands.describe(channel="The channel to use for logs")

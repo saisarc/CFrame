@@ -4,6 +4,8 @@ from groq import AsyncGroq
 from discord.ext import commands
 from dotenv import load_dotenv
 from commands import send_log, disabled_cmds, blocked
+from help_ui import HELP_PAGES, HelpPaginator
+
 
 load_dotenv()
 
@@ -80,14 +82,22 @@ class ExtraCommands(commands.Cog):
         await send_log(self.bot, "COMMAND", f"{interaction.user} looked up **`{query}`** in Lua dictionary.")
 
     # ── /help ───────────────────────────────────────────────────────────────
-    @discord.app_commands.command(name="help", description="Show the available bot commands")
+    @discord.app_commands.command(name="help", description="Interactive help menu")
     async def help(self, interaction: discord.Interaction):
-        if await blocked(interaction): return
+        if await blocked(interaction):
+            return
+
+        paginator = HelpPaginator(author_id=interaction.user.id, pages=HELP_PAGES)
+        await interaction.response.send_message(embed=paginator._build_embed(), view=paginator)
+        return
+
         embed = discord.Embed(
             title="🤖 CFrame Bot Commands",
-            description="Here are the main commands you can use in this server.",
+            description="Quick navigation for everything CFrame can do.",
             color=0x5865F2,
         )
+
+
         embed.add_field(name="🧭 General", value="`/help`\n`/status`\n`/serverinfo`\n`/userinfo`", inline=True)
         embed.add_field(name="🎮 Roblox", value="`/players`\n`/chat`\n`/lua`\n`/roadmap`", inline=True)
         embed.add_field(name="�️ Server Tools", value="`/modhelp`\n`/modsettings`\n`/setlogchannel`\n`/clearlogchannel`\n`/setwelcomechannel`\n`/setwelcomemessage`\n`/disablewelcome`\n`/welcometest`", inline=False)

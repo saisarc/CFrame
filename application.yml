@@ -7,10 +7,13 @@ lavalink:
     password: your_lavalink_password
     sources:
       youtube: false
+
+
     bufferDurationMs: 400
   plugins:
     - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.1"
       snapshot: false
+
 
 plugins:
   youtube:

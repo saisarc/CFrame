@@ -279,34 +279,60 @@ class GameCommands(commands.Cog):
     # ── /status ───────────────────────────────────────────────────────────────
     @discord.app_commands.command(name="status", description="Check bot and system diagnostics")
     async def status(self, interaction: discord.Interaction):
-        if await blocked(interaction): return
+        if await blocked(interaction):
+            return
         await interaction.response.defer()
 
         uptime_secs = int(time.time() - self.start_time)
         h, rem = divmod(uptime_secs, 3600)
-        m, s   = divmod(rem, 60)
+        m, s = divmod(rem, 60)
 
         cpu = psutil.cpu_percent(interval=0.5)
         try:
-            ram = psutil.virtual_memory().percent
+            ram_percent = psutil.virtual_memory().percent
         except Exception:
-            ram = "N/A"
+            ram_percent = "N/A"
+
+        total_users = sum(g.member_count or 0 for g in self.bot.guilds)
+
+        # More professional RAM: percent + bot RSS (host process memory)
+        try:
+            proc = psutil.Process()
+            mem_mb = proc.memory_info().rss / (1024 * 1024)
+            ram_field = f"{ram_percent}% ({mem_mb:.1f} MB RSS)" if ram_percent != "N/A" else f"{mem_mb:.1f} MB RSS"
+        except Exception:
+            ram_field = f"{ram_percent}%" if ram_percent != "N/A" else "N/A"
 
         embed = discord.Embed(
-            title="⚙️ Bot Status",
-            description="Everything is running normally.",
+            title="🟢 CFrame Status",
+            description="Diagnostics for uptime, performance, and bot readiness.",
             color=0x57F287,
         )
-        embed.add_field(name="🟢 Status", value="Online", inline=True)
-        embed.add_field(name="⏱️ Uptime", value=f"{h}h {m}m {s}s", inline=True)
-        embed.add_field(name="🏓 Ping", value=f"{round(self.bot.latency * 1000)}ms", inline=True)
-        embed.add_field(name="🖥️ CPU", value=f"{cpu}%", inline=True)
-        embed.add_field(name="🧠 RAM", value=f"{ram}%" if ram != "N/A" else "N/A", inline=True)
-        embed.add_field(name="🤖 AI", value="Online", inline=True)
-        embed.add_field(name="🏠 Servers", value=str(len(self.bot.guilds)), inline=True)
-        embed.add_field(name="👥 Users", value=str(sum(g.member_count or 0 for g in self.bot.guilds)), inline=True)
+
+        embed.add_field(name="Status", value="Online ✅", inline=True)
+        embed.add_field(name="Uptime", value=f"{h}h {m}m {s}s", inline=True)
+        embed.add_field(name="Latency", value=f"{round(self.bot.latency * 1000)}ms", inline=True)
+
+        embed.add_field(name="CPU", value=f"{cpu}%", inline=True)
+        embed.add_field(name="RAM", value=ram_field, inline=True)
+
+        embed.add_field(name="AI", value="Ready", inline=True)
+        embed.add_field(name="Servers", value=f"{len(self.bot.guilds)}", inline=True)
+        embed.add_field(name="Users", value=f"{total_users:,}", inline=True)
+
+        embed.add_field(
+            name="Notes",
+            value=(
+                "• Uptime + latency are live runtime values\n"
+                "• CPU/RAM reflect the host machine\n"
+                "• Use `/help` for command navigation"
+            ),
+            inline=False,
+        )
+
         embed.set_footer(text="CFrame Bot · Status")
         await interaction.followup.send(embed=embed)
+
 
     # ── /players ──────────────────────────────────────────────────────────────
     @discord.app_commands.command(name="players", description="Get live player count for your Roblox game")
