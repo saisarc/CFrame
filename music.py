@@ -556,12 +556,17 @@ class Music(commands.Cog):
         
         # Also check if current track is a Deezer CDN URL (more reliable)
         current_track = getattr(player, "current", None)
+        print(f"[Deezer] Checking current_track: {current_track}")
         if current_track:
             current_uri = getattr(current_track, "uri", "") or ""
+            print(f"[Deezer] current_track.uri = {current_uri[:100] if current_uri else 'EMPTY'}")
             is_cdn_track = "cdn.discordapp.com" in current_uri or "media.discordapp.net" in current_uri
+            print(f"[Deezer] is_cdn_track check: cdn.discordapp.com={('cdn.discordapp.com' in current_uri)}, media.discordapp.net={('media.discordapp.net' in current_uri)}")
             if is_cdn_track:
-                print(f"[Deezer] Current track IS a CDN URL, treating as 'playing' for queue")
+                print(f"[Deezer] ✓ Current track IS a CDN URL, treating as 'playing' for queue")
                 deezer_recently_loaded = True
+        else:
+            print(f"[Deezer] current_track is None")
         
         if deezer_recently_loaded:
             print(f"[Deezer] ✓ Track recently loaded/playing, treating as 'playing' for queue purposes")
