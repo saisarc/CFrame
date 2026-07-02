@@ -622,6 +622,54 @@ class Music(commands.Cog):
 
         await self.process_play_track(interaction, track)
 
+    async def _fetch_lavalink_lyrics(self, player: wavelink.Player, track_title: str = None, query: str = None):
+        if not await self.is_node_connected():
+            return None, None, None
+
+        node = wavelink.Pool.get_node()
+        if not node:
+            return None, None, None
+
+        http_uri = node.uri.replace("ws://", "http://").replace("wss://", "https://")
+        headers = {"Authorization": node.password}
+        data = None
+
+        if query:
+            search_query = normalize_query_for_lavalink(query)
+            results = await wavelink.Pool.fetch_tracks(search_query)
+            track = None
+            if isinstance(results, list):
+                track = results[0] if results else None
+            else:
+                track = results.tracks[0] if getattr(results, "tracks", None) else None
+            if not track:
+                return None, None, None
+            encoded_track = getattr(track, "encoded", None)
+            if not encoded_track:
+                return None, None, None
+            track_title = getattr(track, "title", track_title or "Unknown Song")
+            url = f"{http_uri}/v4/lyrics/{encoded_track}"
+        else:
+            current_track = getattr(player, "current", None)
+            if not current_track:
+                return None, None, None
+            track_title = getattr(current_track, "title", track_title or "Unknown Song")
+            url = f"{http_uri}/v4/sessions/{node.session_id}/players/{player.guild.id}/lyrics"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                    elif resp.status == 204:
+                        return None, track_title, None
+        except Exception:
+            return None, track_title, None
+
+        if not data or not data.get("text"):
+            return None, track_title, None
+        return data, track_title, None
+
     @discord.app_commands.command(name="lyrics", description="Get the lyrics of the currently playing song or search for a specific song")
     @discord.app_commands.describe(query="Name of the song to search lyrics for (optional)")
     async def lyrics(self, interaction: discord.Interaction, query: str = None):
@@ -634,77 +682,25 @@ class Music(commands.Cog):
         except Exception:
             pass
 
-        if not await self.is_node_connected():
-            await self.send_interaction(interaction, content="❌ Lavalink node is not connected.")
+        voice_client = interaction.guild.voice_client
+        if not voice_client or not voice_client.channel:
+            await self.send_interaction(interaction, content="❌ The bot is not in a voice channel.")
             return
 
-        node = wavelink.Pool.get_node()
-        http_uri = node.uri.replace("ws://", "http://").replace("wss://", "https://")
-        headers = {"Authorization": node.password}
+        player = voice_client
+        if not isinstance(player, wavelink.Player):
+            await self.send_interaction(interaction, content="❌ Voice client is not a valid player.")
+            return
 
-        data = None
-        track_title = "Unknown Song"
-
-        if query:
-            try:
-                search_query = normalize_query_for_lavalink(query)
-                results = await wavelink.Pool.fetch_tracks(search_query)
-                track = None
-                if isinstance(results, list):
-                    track = results[0] if results else None
-                else:
-                    track = results.tracks[0] if getattr(results, "tracks", None) else None
-
-                if not track:
-                    await self.send_interaction(interaction, content=f"❌ No track found for search query: `{query}`")
-                    return
-
-                track_title = track.title
-                encoded_track = getattr(track, "encoded", None)
-                if not encoded_track:
-                    await self.send_interaction(interaction, content="❌ Error: Resolved track has no encoded identifier.")
-                    return
-
-                url = f"{http_uri}/v4/lyrics/{encoded_track}"
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, headers=headers) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                        elif resp.status == 204:
-                            pass
-            except Exception as e:
-                await self.send_interaction(interaction, content=f"❌ Error searching lyrics: `{e}`")
-                return
-        else:
-            voice_client = interaction.guild.voice_client
-            if not voice_client or not voice_client.channel:
-                await self.send_interaction(interaction, content="❌ The bot is not in a voice channel.")
-                return
-
-            player = voice_client
-            if not isinstance(player, wavelink.Player):
-                await self.send_interaction(interaction, content="❌ Voice client is not a valid player.")
-                return
-
+        if not query:
             current_track = getattr(player, "current", None)
             if not current_track:
                 await self.send_interaction(interaction, content="❌ Nothing is currently playing.")
                 return
 
-            track_title = getattr(current_track, "title", "Unknown Song")
-            
-            url = f"{http_uri}/v4/sessions/{node.session_id}/players/{interaction.guild.id}/lyrics"
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, headers=headers) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-            except Exception as e:
-                await self.send_interaction(interaction, content=f"❌ Error fetching player lyrics: `{e}`")
-                return
-
+        data, track_title, _ = await self._fetch_lavalink_lyrics(player, query=query)
         if not data or not data.get("text"):
-            await self.send_interaction(interaction, content=f"❌ No lyrics found for **{track_title}**.")
+            await self.send_interaction(interaction, content=f"❌ No lyrics found for **{track_title or 'the requested track'}**.")
             return
 
         lyrics_text = data["text"]
