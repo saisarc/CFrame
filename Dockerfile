@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
-# Install ffmpeg
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# Install ffmpeg and libsodium (required by PyNaCl for discord.py voice)
+RUN apt-get update && apt-get install -y ffmpeg libsodium-dev && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
