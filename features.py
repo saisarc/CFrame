@@ -409,29 +409,25 @@ class Features(commands.Cog):
             return
 
         # Build a rich welcome embed
-        custom_msg = settings.get("welcome_message", "")
-        if custom_msg:
-            desc = custom_msg.format(
-                mention=member.mention,
-                user=member.name,
-                server=member.guild.name,
-                member_count=member.guild.member_count,
-                user_name=member.display_name,
-            )
-        else:
-            desc = f"Hey {member.mention}, welcome to **{member.guild.name}**! 👋\nYou're member **#{member.guild.member_count:,}**."
+        bot_name = member.guild.me.display_name if member.guild.me else "CFrame"
+        bot_icon = member.guild.me.display_avatar.url if member.guild.me else None
 
-        embed = discord.Embed(description=desc, color=0x57F287)
-        embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        embed = discord.Embed(color=0x57F287)
+        embed.set_author(name=f"Welcome to {member.guild.name}!")
+        embed.description = (
+            f"### {member.display_name}\n"
+            f"**@{member.name}**\n\n"
+            f"Glad to have you here! You're member **#{member.guild.member_count:,}**."
+        )
         embed.set_thumbnail(url=member.display_avatar.url)
         if member.guild.banner:
             embed.set_image(url=member.guild.banner.url)
         embed.set_footer(
-            text=f"{member.guild.name}  ·  {member.guild.member_count:,} members",
-            icon_url=member.guild.icon.url if member.guild.icon else discord.Embed.Empty,
+            text=bot_name,
+            icon_url=bot_icon,
         )
         try:
-            await channel.send(embed=embed)
+            await channel.send(content=member.mention, embed=embed)
         except Exception:
             pass
         await self._send_log(member.guild.id, "👋 Member Joined", f"{member.mention} joined the server.", 0x57F287)
