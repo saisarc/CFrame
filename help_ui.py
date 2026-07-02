@@ -58,6 +58,56 @@ HELP_PAGES = [
         ],
     },
     {
+        "title": "🎵 Music",
+        "commands": [
+            {
+                "name": "/play",
+                "usage": "/play <query|url>",
+                "desc": "Play music from YouTube, Spotify, Apple Music, or direct links via Lavalink.",
+            },
+            {
+                "name": "/deemix",
+                "usage": "/deemix <query|url>",
+                "desc": "Play Deezer/DeeMix content through Lavalink.",
+            },
+            {
+                "name": "/lyrics",
+                "usage": "/lyrics [query]",
+                "desc": "Show lyrics for the current track or a searched song.",
+            },
+            {
+                "name": "/filter",
+                "usage": "/filter <preset>",
+                "desc": "Apply a preset like nightcore, bassboost, or vaporwave.",
+            },
+            {
+                "name": "/join",
+                "usage": "/join",
+                "desc": "Join the voice channel you are currently in.",
+            },
+            {
+                "name": "/leave",
+                "usage": "/leave",
+                "desc": "Leave the voice channel and clear the queue.",
+            },
+            {
+                "name": "/skip",
+                "usage": "/skip",
+                "desc": "Skip the current track.",
+            },
+            {
+                "name": "/pause",
+                "usage": "/pause",
+                "desc": "Pause playback.",
+            },
+            {
+                "name": "/resume",
+                "usage": "/resume",
+                "desc": "Resume playback.",
+            },
+        ],
+    },
+    {
         "title": "🛠️ Server Tools",
         "commands": [
             {

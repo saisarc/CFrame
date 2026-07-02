@@ -21,6 +21,7 @@ Railway service settings:
 - Dockerfile path: `Dockerfile.lavalink`
 - Exposed port: `2333`
 - No command override needed; Dockerfile runs Lavalink automatically.
+- Make sure the Lavalink service is deployed as a TCP-capable container, not a web-only service.
 
 If Railway asks for the service type, choose a container/service type that supports TCP ports rather than a web-only HTTP service.
 
@@ -63,9 +64,10 @@ Use the existing `Dockerfile` in the repo.
 
 Railway env vars for the bot service:
 - `DISCORD_TOKEN`
-- `LAVALINK_HOST` — the Lavalink service hostname or public URL
+- `LAVALINK_HOST` — the Lavalink service hostname or public URL (for example `abc123.up.railway.app` or `https://abc123.up.railway.app`)
 - `LAVALINK_PORT=2333`
 - `LAVALINK_PASSWORD=your_lavalink_password`
+- `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` if you want Spotify source resolution enabled
 
 Your bot code already builds Lavalink URI with:
 

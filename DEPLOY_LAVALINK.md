@@ -13,12 +13,54 @@ wget https://github.com/freyacodes/Lavalink/releases/latest/download/Lavalink.ja
 ```yaml
 server:
   port: 2333
+
 lavalink:
   server:
     password: your_lavalink_password
     sources:
-      youtube: true
+      youtube: false
     bufferDurationMs: 400
+  plugins:
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.1"
+    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.3"
+      repository: "https://maven.lavalink.dev/releases"
+    - dependency: "com.github.topi314.lavalyrics:lavalyrics-plugin:1.1.0"
+      repository: "https://maven.lavalink.dev/releases"
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    clients:
+      - MUSIC
+      - ANDROID_VR
+      - WEB
+      - WEBEMBEDDED
+  lavasrc:
+    providers:
+      - "spsearch:%QUERY%"
+      - "amsearch:%QUERY%"
+      - "dzsearch:%QUERY%"
+      - "ytsearch:%QUERY%"
+    sources:
+      spotify: true
+      applemusic: true
+      deezer: true
+    spotify:
+      clientId: "${SPOTIFY_CLIENT_ID:}"
+      clientSecret: "${SPOTIFY_CLIENT_SECRET:}"
+      countryCode: "US"
+    applemusic:
+      countryCode: "US"
+    deezer:
+      countryCode: "US"
+  lavalyrics:
+    sources:
+      - spotify
+      - applemusic
+      - youtube
 ```
 
 3. Run Lavalink:
