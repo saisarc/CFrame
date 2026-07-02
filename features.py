@@ -613,17 +613,16 @@ class Features(commands.Cog):
     @discord.app_commands.command(name="setlogchannel", description="Set the channel where moderation logs will be sent")
     @discord.app_commands.describe(channel="The channel to use for logs")
     async def setlogchannel(self, interaction: discord.Interaction, channel: discord.TextChannel):
-
         if await blocked(interaction):
             return
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need Manage Server permissions.", ephemeral=True)
             return
+        await interaction.response.defer(ephemeral=True)
         settings = await load_guild_settings(interaction.guild_id)
         settings["log_channel_id"] = channel.id
         await save_guild_settings(interaction.guild_id, settings)
-
-        await interaction.response.send_message(f"✅ Log channel set to {channel.mention}.", ephemeral=True)
+        await interaction.followup.send(f"✅ Log channel set to {channel.mention}.", ephemeral=True)
         await send_log(self.bot, "STATUS", f"{interaction.user} set the log channel to {channel.mention}.")
 
     @discord.app_commands.command(name="clearlogchannel", description="Disable moderation logs for this server")
@@ -633,11 +632,11 @@ class Features(commands.Cog):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need Manage Server permissions.", ephemeral=True)
             return
+        await interaction.response.defer(ephemeral=True)
         settings = await load_guild_settings(interaction.guild_id)
         settings["log_channel_id"] = None
         await save_guild_settings(interaction.guild_id, settings)
-
-        await interaction.response.send_message("✅ Logging has been disabled for this server.", ephemeral=True)
+        await interaction.followup.send("✅ Logging has been disabled for this server.", ephemeral=True)
 
     @discord.app_commands.command(name="setwelcomechannel", description="Set the welcome message channel")
     @discord.app_commands.describe(channel="The channel where new members should be welcomed")
@@ -647,10 +646,11 @@ class Features(commands.Cog):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need Manage Server permissions.", ephemeral=True)
             return
+        await interaction.response.defer(ephemeral=True)
         settings = await load_guild_settings(interaction.guild_id)
         settings["welcome_channel_id"] = channel.id
         await save_guild_settings(interaction.guild_id, settings)
-        await interaction.response.send_message(f"✅ Welcome channel set to {channel.mention}.", ephemeral=True)
+        await interaction.followup.send(f"✅ Welcome channel set to {channel.mention}.", ephemeral=True)
 
     @discord.app_commands.command(name="setwelcomemessage", description="Set the welcome message shown to new members")
     @discord.app_commands.describe(message="The welcome message template")
@@ -660,10 +660,11 @@ class Features(commands.Cog):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need Manage Server permissions.", ephemeral=True)
             return
+        await interaction.response.defer(ephemeral=True)
         settings = await load_guild_settings(interaction.guild_id)
         settings["welcome_message"] = message
         await save_guild_settings(interaction.guild_id, settings)
-        await interaction.response.send_message("✅ Welcome message updated.", ephemeral=True)
+        await interaction.followup.send("✅ Welcome message updated.", ephemeral=True)
 
     @discord.app_commands.command(name="disablewelcome", description="Turn welcome messages on or off")
     @discord.app_commands.describe(enabled="Whether welcome messages should be enabled")
@@ -673,10 +674,11 @@ class Features(commands.Cog):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need Manage Server permissions.", ephemeral=True)
             return
+        await interaction.response.defer(ephemeral=True)
         settings = await load_guild_settings(interaction.guild_id)
         settings["welcome_enabled"] = enabled
         await save_guild_settings(interaction.guild_id, settings)
-        await interaction.response.send_message(f"✅ Welcome messages {'enabled' if enabled else 'disabled'}.", ephemeral=True)
+        await interaction.followup.send(f"✅ Welcome messages {'enabled' if enabled else 'disabled'}.", ephemeral=True)
 
     @discord.app_commands.command(name="welcometest", description="Send a test welcome message")
     async def welcometest(self, interaction: discord.Interaction):
