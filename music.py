@@ -512,28 +512,30 @@ class Music(commands.Cog):
         guild_id = interaction.guild.id
         q = self.get_queue(guild_id)
 
-        is_playing = False
-        try:
-            is_playing_fn = getattr(player, "is_playing", None)
-            if callable(is_playing_fn):
-                is_playing = bool(is_playing_fn())
-        except Exception as e:
-            print(f"[Deezer] is_playing() error: {e}")
-            pass
+        is_playing_fn = getattr(player, "is_playing", None)
+        is_paused_fn = getattr(player, "is_paused", None)
 
-        is_paused = False
-        try:
-            is_paused_fn = getattr(player, "is_paused", None)
+        should_play_now = True
+        if callable(is_playing_fn):
+            try:
+                should_play_now = not bool(is_playing_fn())
+                print(f"[Deezer] is_playing()={is_playing_fn()}, should_play_now={should_play_now}")
+            except Exception as e:
+                print(f"[Deezer] is_playing() error: {e}")
+                should_play_now = True
+        else:
+            paused = False
             if callable(is_paused_fn):
-                is_paused = bool(is_paused_fn())
-        except Exception as e:
-            print(f"[Deezer] is_paused() error: {e}")
-            pass
+                try:
+                    paused = bool(is_paused_fn())
+                    print(f"[Deezer] is_paused()={paused}")
+                except Exception as e:
+                    print(f"[Deezer] is_paused() error: {e}")
+                    paused = False
+            should_play_now = not bool(q) and not paused
+            print(f"[Deezer] Queue logic: queue_len={len(q)}, paused={paused}, should_play_now={should_play_now}")
 
-        queue_len = len(q)
-        print(f"[Deezer] Queue state: is_playing={is_playing}, is_paused={is_paused}, queue_length={queue_len}, will_play_now={not is_playing and not is_paused and not q}")
-
-        if not is_playing and not is_paused and not q:
+        if should_play_now and not q:
             await player.play(track)
             self.deezer_now_playing[interaction.guild.id] = (title, artist)
             status = "Now playing"
@@ -548,7 +550,7 @@ class Music(commands.Cog):
                 "requester_name": interaction.user.display_name,
             })
             status = "Added to queue"
-            print(f"[Deezer] Queued: {title} (queue now has {queue_len + 1} items)")
+            print(f"[Deezer] Queued: {title} (queue now has {len(q) + 1} items)")
 
         embed = discord.Embed(
             title="🎧 Now playing" if status != "Added to queue" else "📥 Added to Queue",
