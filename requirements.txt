@@ -9,3 +9,4 @@ Wavelink
 motor
 pymongo
 deemix
+deezer-py
