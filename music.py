@@ -550,13 +550,13 @@ class Music(commands.Cog):
             should_play_now = not bool(q) and not paused
             print(f"[Deezer] Queue logic: queue_len={len(q)}, paused={paused}, should_play_now={should_play_now}")
 
-        # Check if a Deezer track was recently loaded (within 3 seconds) - race condition check
+        # Check if a Deezer track was recently loaded (within 5 seconds) - race condition check
         current_time = time.time()
         deezer_recently_loaded = False
         if guild_id in self.deezer_loaded:
             time_since_load = current_time - self.deezer_loaded[guild_id]
-            deezer_recently_loaded = time_since_load < 3.0
-            print(f"[Deezer] Recently loaded check: guild_id={guild_id}, time_since_load={time_since_load:.2f}s, within_3s={deezer_recently_loaded}")
+            deezer_recently_loaded = time_since_load < 5.0  # Extended to 5 seconds for upload time
+            print(f"[Deezer] Recently loaded check: time_since_load={time_since_load:.2f}s, within_5s={deezer_recently_loaded}")
         else:
             print(f"[Deezer] No recent Deezer load for guild {guild_id}")
         
@@ -567,7 +567,7 @@ class Music(commands.Cog):
             current_uri = getattr(current_track, "uri", "") or ""
             print(f"[Deezer] current_track.uri = {current_uri[:100] if current_uri else 'EMPTY'}")
             is_cdn_track = "cdn.discordapp.com" in current_uri or "media.discordapp.net" in current_uri
-            print(f"[Deezer] is_cdn_track check: cdn.discordapp.com={('cdn.discordapp.com' in current_uri)}, media.discordapp.net={('media.discordapp.net' in current_uri)}")
+            print(f"[Deezer] is_cdn_track check: cdn={('cdn.discordapp.com' in current_uri)}")
             if is_cdn_track:
                 print(f"[Deezer] ✓ Current track IS a CDN URL, treating as 'playing' for queue")
                 deezer_recently_loaded = True
@@ -575,7 +575,7 @@ class Music(commands.Cog):
             print(f"[Deezer] current_track is None")
         
         if deezer_recently_loaded:
-            print(f"[Deezer] ✓ Track recently loaded/playing, treating as 'playing' for queue purposes")
+            print(f"[Deezer] ✓ Deezer track recently loaded/playing, will QUEUE instead of playing immediately")
             should_play_now = False
 
         if should_play_now and not q:
