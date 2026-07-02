@@ -516,6 +516,10 @@ class Music(commands.Cog):
 
         guild_id = interaction.guild.id
         q = self.get_queue(guild_id)
+        
+        print(f"[Deezer] === NEW /play REQUEST ===")
+        print(f"[Deezer] guild_id={guild_id}, guild_name={interaction.guild.name}")
+        print(f"[Deezer] Current deezer_loaded state: {self.deezer_loaded}")
 
         is_playing_fn = getattr(player, "is_playing", None)
         is_paused_fn = getattr(player, "is_paused", None)
@@ -541,18 +545,29 @@ class Music(commands.Cog):
             print(f"[Deezer] Queue logic: queue_len={len(q)}, paused={paused}, should_play_now={should_play_now}")
 
         # Check if a Deezer track was recently loaded (within 3 seconds) - race condition check
-        deezer_recently_loaded = guild_id in self.deezer_loaded and (time.time() - self.deezer_loaded[guild_id]) < 3.0
+        current_time = time.time()
+        deezer_recently_loaded = False
+        if guild_id in self.deezer_loaded:
+            time_since_load = current_time - self.deezer_loaded[guild_id]
+            deezer_recently_loaded = time_since_load < 3.0
+            print(f"[Deezer] Recently loaded check: guild_id={guild_id}, time_since_load={time_since_load:.2f}s, within_3s={deezer_recently_loaded}")
+        else:
+            print(f"[Deezer] No recent Deezer load for guild {guild_id}")
+        
         if deezer_recently_loaded:
-            print(f"[Deezer] Track recently loaded, treating as 'playing' for queue purposes")
+            print(f"[Deezer] ✓ Track recently loaded, treating as 'playing' for queue purposes")
             should_play_now = False
 
         if should_play_now and not q:
+            print(f"[Deezer] BEFORE player.play(): deezer_loaded keys = {list(self.deezer_loaded.keys())}")
             await player.play(track)
             self.deezer_loaded[guild_id] = time.time()  # Mark as loaded
+            print(f"[Deezer] AFTER player.play(): set deezer_loaded[{guild_id}] = {self.deezer_loaded[guild_id]}")
             self.deezer_now_playing[interaction.guild.id] = (title, artist)
             status = "Now playing"
             print(f"[Deezer] Playing immediately: {title}")
         else:
+            print(f"[Deezer] Should queue: should_play_now={should_play_now}, queue_len={len(q)}")
             q.append({
                 "track": track,
                 "title": title,
