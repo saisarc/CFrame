@@ -45,6 +45,10 @@ def source_to_search_prefix(source: str) -> str:
     return mapping.get(source_key, "ytsearch")
 
 
+def spotify_credentials_configured() -> bool:
+    return bool(os.getenv("SPOTIFY_CLIENT_ID", "").strip()) and bool(os.getenv("SPOTIFY_CLIENT_SECRET", "").strip())
+
+
 def make_embed(title: str, description: str, color: int = 0x2b2d31, thumbnail: str = None) -> discord.Embed:
     """Creates a sleek, modern Discord embed matching the native dark theme."""
     embed = discord.Embed(title=title, description=description, color=color)
@@ -67,6 +71,14 @@ class SourceSelectionView(discord.ui.View):
         except Exception:
             pass
 
+        if prefix == "spsearch" and not spotify_credentials_configured():
+            await self.cog.send_interaction(
+                interaction,
+                content="⚠️ Spotify search is unavailable on this deployment because Spotify credentials are not configured. Please try YouTube or Apple Music instead.",
+                ephemeral=True,
+            )
+            return
+
         search_query = f"{prefix}:{self.query}"
         try:
             results = await wavelink.Pool.fetch_tracks(search_query)
@@ -82,7 +94,15 @@ class SourceSelectionView(discord.ui.View):
 
             await self.cog.process_play_track(interaction, track)
         except Exception as e:
-            await self.cog.send_interaction(interaction, content=f"❌ Error: `{e}`", ephemeral=True)
+            message = str(e).lower()
+            if prefix == "spsearch" and ("forbidden" in message or "403" in message or "something went wrong while looking up the track" in message):
+                await self.cog.send_interaction(
+                    interaction,
+                    content="⚠️ Spotify lookup failed. The current Lavalink setup is not authorized for that search. Please try YouTube or Apple Music instead.",
+                    ephemeral=True,
+                )
+            else:
+                await self.cog.send_interaction(interaction, content=f"❌ Error: `{e}`", ephemeral=True)
 
     @discord.ui.button(label="YouTube", style=discord.ButtonStyle.danger, emoji="🔴")
     async def youtube_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -469,7 +489,14 @@ class Music(commands.Cog):
                 await self.send_interaction(interaction, content="❌ No audio tracks found for that query.")
                 return
         except Exception as error:
-            await self.send_interaction(interaction, content=f"❌ Could not play audio: `{error}`")
+            message = str(error).lower()
+            if search_query.startswith("spsearch:") and ("forbidden" in message or "403" in message or "something went wrong while looking up the track" in message):
+                await self.send_interaction(
+                    interaction,
+                    content="⚠️ Spotify lookup failed. The current Lavalink setup is not authorized for that search. Please try YouTube or Apple Music instead.",
+                )
+            else:
+                await self.send_interaction(interaction, content=f"❌ Could not play audio: `{error}`")
             return
 
         await self.process_play_track(interaction, track)
