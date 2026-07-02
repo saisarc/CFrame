@@ -275,10 +275,6 @@ class Music(commands.Cog):
 
         # Tracks currently playing via Deezer CDN: guild_id -> (title, artist)
         self.deezer_now_playing: dict[int, tuple[str, str]] = {}
-        
-        # Deezer tracks "currently loaded" (we called player.play() but is_playing may not have updated)
-        # guild_id -> timestamp when track was loaded
-        self.deezer_loaded: dict[int, float] = {}
 
         bot.loop.create_task(self.connect_node())
         bot.loop.create_task(self.queue_worker())
@@ -389,6 +385,16 @@ class Music(commands.Cog):
 
             listener = _DeemixListener()
             DeemixDownloader(dz, dl_obj, settings, listener).start()
+
+            # Wait for deemix to download the file (up to 15 seconds)
+            print(f"[Deemix] Waiting for download to complete...")
+            for attempt in range(150):  # 15 seconds with 0.1s checks
+                time.sleep(0.1)
+                if listener.completed:
+                    print(f"[Deemix] Download event received after {attempt * 0.1:.1f}s")
+                    break
+            else:
+                print(f"[Deemix] Timeout waiting for download event (15s), proceeding with file detection")
 
             # Strategy 1: time-based detection with a 3s buffer for clock skew
             def _new_files_in(path: Path):
@@ -516,74 +522,35 @@ class Music(commands.Cog):
 
         guild_id = interaction.guild.id
         q = self.get_queue(guild_id)
-        
-        print(f"[Deezer] === NEW /play REQUEST ===")
-        print(f"[Deezer] guild_id={guild_id}, guild_name={interaction.guild.name}")
-        print(f"[Deezer] PERSISTENT STATE CHECK:")
-        print(f"[Deezer]   deezer_loaded dict = {self.deezer_loaded}")
-        print(f"[Deezer]   queue length = {len(q)}")
-        print(f"[Deezer]   Keys in deezer_loaded: {list(self.deezer_loaded.keys())}")
-        if guild_id in self.deezer_loaded:
-            elapsed = time.time() - self.deezer_loaded[guild_id]
-            print(f"[Deezer]   ⚠️  Guild HAS deezer_loaded! Elapsed: {elapsed:.2f}s")
 
-        is_playing_fn = getattr(player, "is_playing", None)
-        is_paused_fn = getattr(player, "is_paused", None)
-
-        should_play_now = True
-        if callable(is_playing_fn):
-            try:
-                should_play_now = not bool(is_playing_fn())
-                print(f"[Deezer] is_playing()={is_playing_fn()}, should_play_now={should_play_now}")
-            except Exception as e:
-                print(f"[Deezer] is_playing() error: {e}")
-                should_play_now = True
-        else:
-            paused = False
-            if callable(is_paused_fn):
-                try:
-                    paused = bool(is_paused_fn())
-                    print(f"[Deezer] is_paused()={paused}")
-                except Exception as e:
-                    print(f"[Deezer] is_paused() error: {e}")
-                    paused = False
-            should_play_now = not bool(q) and not paused
-            print(f"[Deezer] Queue logic: queue_len={len(q)}, paused={paused}, should_play_now={should_play_now}")
-
-        # Check if should queue: look at is_playing(), is_paused(), queue, OR deezer_loaded flag
-        current_time = time.time()
+        # Check if something is already playing or queued in Lavalink
+        # These are more reliable than is_playing() which may not update immediately
+        lavalink_has_content = False
         
-        # Strategy 1: Check deezer_loaded flag (tracks what we just played)
-        deezer_recently_loaded = False
-        if guild_id in self.deezer_loaded:
-            time_since_load = current_time - self.deezer_loaded[guild_id]
-            deezer_recently_loaded = time_since_load < 5.0
-            print(f"[Deezer] Strategy 1 - Recently loaded: time_since_load={time_since_load:.2f}s, within_5s={deezer_recently_loaded}")
-        
-        # Strategy 2: Check current track URI (if Lavalink has already loaded it)
+        # Check 1: Is there a current track in Lavalink?
         current_track = getattr(player, "current", None)
-        is_cdn_playing = False
         if current_track:
-            current_uri = getattr(current_track, "uri", "") or ""
-            is_cdn_playing = "cdn.discordapp.com" in current_uri or "media.discordapp.net" in current_uri
-            print(f"[Deezer] Strategy 2 - Current track URI check: is_cdn={is_cdn_playing}")
+            lavalink_has_content = True
+            print(f"[Deezer] ✓ Lavalink has current track: {getattr(current_track, 'title', 'Unknown')}")
         
-        # If EITHER strategy says something is playing, queue instead of playing
-        should_queue_not_play = deezer_recently_loaded or is_cdn_playing
-        if should_queue_not_play:
-            print(f"[Deezer] ✓ Deezer track detected (loaded or playing), will QUEUE this next song")
-            should_play_now = False
-
-        if should_play_now and not q:
-            print(f"[Deezer] BEFORE player.play(): deezer_loaded keys = {list(self.deezer_loaded.keys())}")
-            await player.play(track)
-            self.deezer_loaded[guild_id] = time.time()  # Mark as loaded
-            print(f"[Deezer] AFTER player.play(): set deezer_loaded[{guild_id}] = {self.deezer_loaded[guild_id]}")
-            self.deezer_now_playing[interaction.guild.id] = (title, artist)
-            status = "Now playing"
-            print(f"[Deezer] Playing immediately: {title}")
-        else:
-            print(f"[Deezer] Should queue: should_play_now={should_play_now}, queue_len={len(q)}")
+        # Check 2: Does Lavalink's queue have items?
+        lavalink_queue = getattr(player, "queue", None)
+        if lavalink_queue and len(lavalink_queue) > 0:
+            lavalink_has_content = True
+            print(f"[Deezer] ✓ Lavalink queue has {len(lavalink_queue)} items")
+        
+        # Check 3: Do we have items in our own queue?
+        if len(q) > 0:
+            lavalink_has_content = True
+            print(f"[Deezer] ✓ Our queue has {len(q)} items")
+        
+        print(f"[Deezer] Lavalink content check: has_content={lavalink_has_content}")
+        
+        # Always call player.play() - Lavalink will queue automatically if needed
+        # Just use it to determine the response message
+        if lavalink_has_content:
+            print(f"[Deezer] Queuing: {title}")
+            status = "Added to queue"
             q.append({
                 "track": track,
                 "title": title,
@@ -592,8 +559,16 @@ class Music(commands.Cog):
                 "requester_id": interaction.user.id,
                 "requester_name": interaction.user.display_name,
             })
-            status = "Added to queue"
-            print(f"[Deezer] Queued: {title} (queue now has {len(q) + 1} items)")
+            # Store metadata for lyrics even if queued
+            self.deezer_now_playing[interaction.guild.id] = (title, artist)
+            print(f"[Deezer] Queued: {title} (queue will have {len(q) + 1} items)")
+        else:
+            print(f"[Deezer] Playing immediately: {title}")
+            status = "Now playing"
+            self.deezer_now_playing[interaction.guild.id] = (title, artist)
+        
+        # Always call player.play() - Lavalink handles queueing automatically
+        await player.play(track)
 
         embed = discord.Embed(
             title="🎧 Now playing" if status != "Added to queue" else "📥 Added to Queue",
@@ -770,10 +745,6 @@ class Music(commands.Cog):
 
                     title = next_item.get("title") or getattr(track, "title", "Unknown")
                     artist = next_item.get("artist") or getattr(track, "author", "Unknown Artist")
-                    
-                    # Clear deezer_loaded flag since track is now actually playing
-                    if guild_id in self.deezer_loaded:
-                        del self.deezer_loaded[guild_id]
                     
                     # If this was a Deezer track, update now-playing metadata for lyrics
                     if "artist" in next_item:
@@ -1208,10 +1179,12 @@ class Music(commands.Cog):
 
     async def _fetch_lavalink_lyrics(self, player: wavelink.Player, track_title: str = None, query: str = None):
         if not await self.is_node_connected():
+            print(f"[Lyrics] Node not connected")
             return None, None, None
 
         node = wavelink.Pool.get_node()
         if not node:
+            print(f"[Lyrics] No node found")
             return None, None, None
 
         http_uri = node.uri.replace("ws://", "http://").replace("wss://", "https://")
@@ -1219,39 +1192,60 @@ class Music(commands.Cog):
         data = None
 
         if query:
+            print(f"[Lyrics] Searching for lyrics with query: {query}")
             search_query = normalize_query_for_lavalink(query)
+            print(f"[Lyrics] Normalized query: {search_query}")
+            
             results = await wavelink.Pool.fetch_tracks(search_query)
             track = None
             if isinstance(results, list):
                 track = results[0] if results else None
             else:
                 track = results.tracks[0] if getattr(results, "tracks", None) else None
+            
             if not track:
-                return None, None, None
+                print(f"[Lyrics] ❌ Search found no track")
+                return None, query, None
+            
+            print(f"[Lyrics] Found track: {getattr(track, 'title', 'Unknown')}")
             encoded_track = getattr(track, "encoded", None)
             if not encoded_track:
-                return None, None, None
-            track_title = getattr(track, "title", track_title or "Unknown Song")
+                print(f"[Lyrics] ❌ Track has no encoded data")
+                return None, query, None
+            
+            track_title = getattr(track, "title", query or "Unknown Song")
             url = f"{http_uri}/v4/lyrics/{encoded_track}"
+            print(f"[Lyrics] Using lyrics endpoint: {url[:100]}...")
         else:
             current_track = getattr(player, "current", None)
             if not current_track:
+                print(f"[Lyrics] No current track in player")
                 return None, None, None
             track_title = getattr(current_track, "title", track_title or "Unknown Song")
             url = f"{http_uri}/v4/sessions/{node.session_id}/players/{player.guild.id}/lyrics"
+            print(f"[Lyrics] Using player lyrics endpoint for: {track_title}")
 
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers) as resp:
+                    print(f"[Lyrics] Response status: {resp.status}")
                     if resp.status == 200:
                         data = await resp.json()
+                        print(f"[Lyrics] ✅ Got lyrics data")
                     elif resp.status == 204:
+                        print(f"[Lyrics] No lyrics available (204)")
                         return None, track_title, None
-        except Exception:
+                    else:
+                        print(f"[Lyrics] Error response: {resp.status}")
+        except Exception as e:
+            print(f"[Lyrics] Request error: {e}")
             return None, track_title, None
 
         if not data or not data.get("text"):
+            print(f"[Lyrics] ❌ No text in response")
             return None, track_title, None
+        
+        print(f"[Lyrics] ✅ Successfully fetched {len(data.get('text', ''))} characters of lyrics")
         return data, track_title, None
 
     @discord.app_commands.command(name="lyrics", description="Get the lyrics of the currently playing song or search for a specific song")
