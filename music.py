@@ -1,10 +1,12 @@
 import asyncio
 import os
 import time
+import re
 from urllib.parse import urlparse
 import collections
 from collections import deque
 from pathlib import Path
+from html import unescape
 import discord
 from discord.ext import commands
 import wavelink
@@ -1708,6 +1710,114 @@ class Music(commands.Cog):
         print(f"[Lyrics] ✅ Successfully fetched {len(data.get('text', ''))} characters of lyrics")
         return data, track_title, None
 
+    def _split_lyrics_chunks(self, lyrics_text: str, max_length: int = 3500) -> list[str]:
+        chunks = []
+        current_chunk = ""
+
+        for line in lyrics_text.splitlines():
+            if len(current_chunk) + len(line) + 1 > max_length:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                current_chunk = line + "\n"
+            else:
+                current_chunk += line + "\n"
+
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        return chunks
+
+    async def _fetch_external_lyrics(self, title: str, artist: str) -> tuple[str | None, str | None, str | None]:
+        search_title = (title or "").strip()
+        search_artist = (artist or "").strip()
+        if not search_title:
+            return None, None, None
+
+        async with aiohttp.ClientSession() as session:
+            if search_artist:
+                lyrics_ovh_url = f"https://api.lyrics.ovh/v1/{search_artist}/{search_title}"
+                try:
+                    async with session.get(lyrics_ovh_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            text = (data.get("lyrics") or "").strip()
+                            if text:
+                                return text, "Lyrics.ovh", "Lyrics.ovh"
+                except Exception as e:
+                    print(f"[Lyrics] Lyrics.ovh fallback error: {e}")
+
+            search_terms = " ".join(part for part in [search_title, search_artist] if part).strip()
+            if not search_terms:
+                return None, None, None
+
+            try:
+                genius_search_url = "https://genius.com/api/search/multi"
+                params = {"q": search_terms, "per_page": 5}
+                headers = {"User-Agent": "Mozilla/5.0"}
+                async with session.get(genius_search_url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status != 200:
+                        return None, None, None
+                    data = await resp.json()
+
+                sections = data.get("response", {}).get("sections", [])
+                song_url = None
+                for section in sections:
+                    if section.get("type") != "song":
+                        continue
+                    hits = section.get("hits", [])
+                    if not hits:
+                        continue
+                    song = hits[0].get("result", {})
+                    song_url = song.get("url")
+                    if song_url:
+                        break
+
+                if not song_url:
+                    return None, None, None
+
+                async with session.get(song_url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status != 200:
+                        return None, None, None
+                    html = await resp.text()
+
+                blocks = re.findall(r'<div[^>]+data-lyrics-container="true"[^>]*>(.*?)</div>', html, re.S)
+                if not blocks:
+                    return None, None, None
+
+                lyric_parts: list[str] = []
+                for block in blocks:
+                    block = re.sub(r"<br\s*/?>", "\n", block, flags=re.I)
+                    block = re.sub(r"<.*?>", "", block)
+                    block = unescape(block).strip()
+                    if block:
+                        lyric_parts.append(block)
+
+                text = "\n\n".join(lyric_parts).strip()
+                if text:
+                    return text, "Genius", "Genius"
+            except Exception as e:
+                print(f"[Lyrics] Genius fallback error: {e}")
+
+        return None, None, None
+
+    async def _send_lyrics_embeds(self, interaction: discord.Interaction, track_title: str, lyrics_text: str, source_name: str, provider: str):
+        chunks = self._split_lyrics_chunks(lyrics_text)
+        for idx, chunk in enumerate(chunks):
+            page_title = f"🎤 Lyrics: {track_title}"
+            if len(chunks) > 1:
+                page_title += f" (Part {idx + 1}/{len(chunks)})"
+
+            embed = discord.Embed(title=page_title, description=chunk, color=0x2b2d31)
+            embed.set_footer(text=f"Source: {source_name} via {provider}")
+
+            if idx == 0:
+                if interaction.response.is_done():
+                    await interaction.followup.send(embed=embed)
+                else:
+                    await interaction.response.send_message(embed=embed)
+            else:
+                await interaction.followup.send(embed=embed)
+
     @discord.app_commands.command(name="lyrics", description="Get the lyrics of the currently playing song or search for a specific song")
     @discord.app_commands.describe(query="Name of the song to search lyrics for (optional)")
     async def lyrics(self, interaction: discord.Interaction, query: str = None):
@@ -1969,43 +2079,20 @@ class Music(commands.Cog):
         query = f"{title} {artist}".strip()
         data, track_title, _ = await self._fetch_lavalink_lyrics(player, query=query)
         if not data or not data.get("text"):
-            await self.send_interaction(interaction, content=f"❌ No lyrics found for **{track_title or title}**.", ephemeral=True)
+            fallback_text, source_name, provider = await self._fetch_external_lyrics(track_title or title, artist)
+            if not fallback_text:
+                await self.send_interaction(interaction, content=f"❌ No lyrics found for **{track_title or title}**.", ephemeral=True)
+                return
+            await self._send_lyrics_embeds(interaction, track_title or title, fallback_text, source_name or "External", provider or "External")
             return
 
-        lyrics_text = data["text"]
-        source_name = data.get("sourceName", "Unknown Source")
-        provider = data.get("provider", "LavaLyrics")
-
-        chunks = []
-        current_chunk = ""
-        for line in lyrics_text.splitlines():
-            if len(current_chunk) + len(line) + 2 > 3500:
-                chunks.append(current_chunk)
-                current_chunk = line + "\n"
-            else:
-                current_chunk += line + "\n"
-        if current_chunk:
-            chunks.append(current_chunk)
-
-        for idx, chunk in enumerate(chunks):
-            page_title = f"🎤 Lyrics: {track_title or title}"
-            if len(chunks) > 1:
-                page_title += f" (Part {idx + 1}/{len(chunks)})"
-
-            embed = discord.Embed(
-                title=page_title,
-                description=chunk,
-                color=0x2b2d31,
-            )
-            embed.set_footer(text=f"Source: {source_name} via {provider}")
-
-            if idx == 0:
-                if interaction.response.is_done():
-                    await interaction.followup.send(embed=embed)
-                else:
-                    await interaction.response.send_message(embed=embed)
-            else:
-                await interaction.followup.send(embed=embed)
+        await self._send_lyrics_embeds(
+            interaction,
+            track_title or title,
+            data["text"],
+            data.get("sourceName", "Unknown Source"),
+            data.get("provider", "LavaLyrics"),
+        )
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
