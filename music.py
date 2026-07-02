@@ -491,14 +491,22 @@ class Music(commands.Cog):
             raise
 
         # Fetch and play via Lavalink
+        print(f"[CDN] Fetching from Lavalink: {cdn_url[:100]}...")
         results = await wavelink.Pool.fetch_tracks(cdn_url)
+        print(f"[CDN] Lavalink results type: {type(results)}, results: {results}")
+        
         track = None
         if isinstance(results, list):
+            print(f"[CDN] Results is list with {len(results)} items")
             track = results[0] if results else None
         else:
-            track = results.tracks[0] if getattr(results, "tracks", None) else None
+            tracks = getattr(results, "tracks", None)
+            print(f"[CDN] Results is object with tracks: {tracks}")
+            track = tracks[0] if tracks else None
 
         if not track:
+            print(f"[CDN] FAILED: Lavalink could not load the audio from Discord CDN")
+            print(f"[CDN] Full results object: {results}")
             raise RuntimeError("Lavalink could not load the audio from Discord CDN.")
 
         guild_id = interaction.guild.id
