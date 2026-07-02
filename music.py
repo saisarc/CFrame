@@ -395,12 +395,12 @@ class Music(commands.Cog):
         except Exception as e:
             print(f"[Cleanup] Error in cleanup_deezer_cache: {e}")
 
-    async def download_deezer_track(self, query: str) -> tuple[str, str, str]:
+    async def download_deezer_track(self, query: str) -> tuple[str, str, str, str | None]:
         """
         Download a Deezer track using Deemix.
         query can be a Deezer URL or a numeric track ID string.
         Raises RuntimeError with a descriptive message on any failure.
-        Returns: (file_path, track_title, artist_name)
+        Returns: (file_path, track_title, artist_name, album_art_url)
         """
         if not DEEMIX_AVAILABLE:
             raise RuntimeError("deemix is not installed on this server. Check Railway build logs.")
@@ -438,7 +438,7 @@ class Music(commands.Cog):
                     title, artist = await asyncio.to_thread(_get_meta)
                 except Exception:
                     pass
-                return (cached_path, title, artist)
+                return (cached_path, title, artist, None)
             else:
                 # File was wiped (redeploy), remove stale entry
                 del self.deezer_track_cache[cache_key]
