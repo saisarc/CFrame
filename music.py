@@ -88,8 +88,8 @@ def is_deezer_query(query: str) -> bool:
 
 
 def get_deezer_cache_dir() -> Path:
-    """Get or create the Deezer cache directory."""
-    cache_dir = Path(os.getenv("DEEZER_CACHE_DIR", "./deezer_cache"))
+    """Get or create the Deezer cache directory. Always returns an absolute path."""
+    cache_dir = Path(os.getenv("DEEZER_CACHE_DIR", "./deezer_cache")).resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
@@ -299,11 +299,7 @@ class Music(commands.Cog):
             if not dz.login_via_arl(arl_token):
                 raise RuntimeError("ARL login failed — your token may be expired. Get a new one from deezer.com cookies.")
 
-            before = (
-                set(cache_dir.rglob("*.mp3"))
-                | set(cache_dir.rglob("*.flac"))
-                | set(cache_dir.rglob("*.m4a"))
-            )
+            before = set(f for f in cache_dir.rglob("*") if f.is_file())
 
             title = "Unknown"
             artist = "Unknown Artist"
@@ -333,14 +329,13 @@ class Music(commands.Cog):
 
             DeemixDownloader(dz, dl_obj, settings).start()
 
-            after = (
-                set(cache_dir.rglob("*.mp3"))
-                | set(cache_dir.rglob("*.flac"))
-                | set(cache_dir.rglob("*.m4a"))
-            )
+            after = set(f for f in cache_dir.rglob("*") if f.is_file())
             new_files = after - before
             if not new_files:
-                raise RuntimeError("Download ran but no audio file appeared in cache. The track may not be available in your region or requires a Premium account.")
+                raise RuntimeError(
+                    f"Download ran but no file appeared in `{cache_dir}`. "
+                    "The track may be unavailable in your region, or check that your account has stream access."
+                )
 
             return (str(list(new_files)[0]), title, artist)
 
@@ -778,15 +773,8 @@ class Music(commands.Cog):
         if is_deezer_query(query):
             # === DEEZER PATH: Download via Deemix + play via FFmpeg ===
             try:
-                # Download the track
                 file_path, title, artist = await self.download_deezer_track(query)
                 await self.play_local_file(interaction, file_path, title, artist)
-
-                file_path, title, artist = result
-
-                # Play the local file
-                await self.play_local_file(interaction, file_path, title, artist)
-
             except Exception as e:
                 await self.send_interaction(
                     interaction,
