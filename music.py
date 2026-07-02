@@ -519,7 +519,13 @@ class Music(commands.Cog):
         
         print(f"[Deezer] === NEW /play REQUEST ===")
         print(f"[Deezer] guild_id={guild_id}, guild_name={interaction.guild.name}")
-        print(f"[Deezer] Current deezer_loaded state: {self.deezer_loaded}")
+        print(f"[Deezer] PERSISTENT STATE CHECK:")
+        print(f"[Deezer]   deezer_loaded dict = {self.deezer_loaded}")
+        print(f"[Deezer]   queue length = {len(q)}")
+        print(f"[Deezer]   Keys in deezer_loaded: {list(self.deezer_loaded.keys())}")
+        if guild_id in self.deezer_loaded:
+            elapsed = time.time() - self.deezer_loaded[guild_id]
+            print(f"[Deezer]   ⚠️  Guild HAS deezer_loaded! Elapsed: {elapsed:.2f}s")
 
         is_playing_fn = getattr(player, "is_playing", None)
         is_paused_fn = getattr(player, "is_paused", None)
