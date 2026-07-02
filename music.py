@@ -130,13 +130,20 @@ class _DeemixListener:
     """Minimal deemix listener that logs events and captures the saved file path."""
     def __init__(self):
         self.saved_path: str | None = None
+        self.completed: list[dict] = []  # track dicts from downloadInfo state=tagged
 
     def send(self, key, value=None):
         print(f"[Deemix] {key}: {value!r}")
         if isinstance(value, dict):
+            # Direct path keys (some deemix versions include these)
             for k in ("path", "filename", "file"):
                 if value.get(k):
                     self.saved_path = str(value[k])
+            # Capture completed track metadata for fallback filename search
+            if key == "downloadInfo" and value.get("state") == "tagged":
+                data = value.get("data")
+                if isinstance(data, dict):
+                    self.completed.append(data)
 
 
 def make_embed(title: str, description: str, color: int = 0x2b2d31, thumbnail: str = None) -> discord.Embed:
@@ -378,12 +385,12 @@ class Music(commands.Cog):
             listener = _DeemixListener()
             DeemixDownloader(dz, dl_obj, settings, listener).start()
 
-            # Use modification time to detect new files — catches any download location
+            # Strategy 1: time-based detection with a 3s buffer for clock skew
             def _new_files_in(path: Path):
                 result = set()
                 try:
                     for f in path.rglob("*"):
-                        if f.is_file() and f.stat().st_mtime >= start_ts:
+                        if f.is_file() and f.stat().st_mtime >= (start_ts - 3):
                             result.add(f)
                 except Exception:
                     pass
@@ -391,7 +398,7 @@ class Music(commands.Cog):
 
             new_files = _new_files_in(cache_dir)
 
-            # Fallback: check deemix default locations in case settings override didn't stick
+            # Strategy 2: check deemix default fallback locations
             if not new_files:
                 for fallback in [
                     Path.home() / "Deemix",
@@ -405,11 +412,41 @@ class Music(commands.Cog):
                             print(f"[Deemix] Found file in fallback dir: {fallback}")
                             break
 
-            # Fallback: use path captured by listener
+            # Strategy 3: use listener's captured path directly
             if not new_files and listener.saved_path:
                 p = Path(listener.saved_path)
                 if p.exists():
                     new_files.add(p)
+
+            # Strategy 4: match by title/artist in filenames across the cache dir
+            if not new_files and listener.completed:
+                for track_data in listener.completed:
+                    t = track_data.get("title", "").lower()
+                    a = track_data.get("artist", "").lower()
+                    try:
+                        for f in cache_dir.rglob("*"):
+                            if f.is_file():
+                                name = f.name.lower()
+                                if t and t in name:
+                                    new_files.add(f)
+                                    break
+                                if a and a in name:
+                                    new_files.add(f)
+                                    break
+                    except Exception:
+                        pass
+
+            # Strategy 5: last resort — most recently modified audio file in cache
+            if not new_files:
+                audio_exts = {".mp3", ".flac", ".m4a", ".ogg", ".opus"}
+                candidates = [
+                    f for f in cache_dir.rglob("*")
+                    if f.is_file() and f.suffix.lower() in audio_exts
+                ]
+                if candidates:
+                    newest = max(candidates, key=lambda f: f.stat().st_mtime)
+                    new_files.add(newest)
+                    print(f"[Deemix] Using most-recent file as fallback: {newest}")
 
             if not new_files:
                 raise RuntimeError(
@@ -472,22 +509,38 @@ class Music(commands.Cog):
             is_playing_fn = getattr(player, "is_playing", None)
             if callable(is_playing_fn):
                 is_playing = bool(is_playing_fn())
-        except Exception:
+        except Exception as e:
+            print(f"[Deezer] is_playing() error: {e}")
             pass
 
-        if not is_playing and not q:
+        is_paused = False
+        try:
+            is_paused_fn = getattr(player, "is_paused", None)
+            if callable(is_paused_fn):
+                is_paused = bool(is_paused_fn())
+        except Exception as e:
+            print(f"[Deezer] is_paused() error: {e}")
+            pass
+
+        queue_len = len(q)
+        print(f"[Deezer] Queue state: is_playing={is_playing}, is_paused={is_paused}, queue_length={queue_len}, will_play_now={not is_playing and not is_paused and not q}")
+
+        if not is_playing and not is_paused and not q:
             await player.play(track)
             self.deezer_now_playing[interaction.guild.id] = (title, artist)
             status = "Now playing"
+            print(f"[Deezer] Playing immediately: {title}")
         else:
             q.append({
                 "track": track,
                 "title": title,
+                "artist": artist,
                 "uri": cdn_url,
                 "requester_id": interaction.user.id,
                 "requester_name": interaction.user.display_name,
             })
             status = "Added to queue"
+            print(f"[Deezer] Queued: {title} (queue now has {queue_len + 1} items)")
 
         embed = discord.Embed(
             title="🎧 Now playing" if status != "Added to queue" else "📥 Added to Queue",
@@ -663,6 +716,12 @@ class Music(commands.Cog):
                     await player.play(track)
 
                     title = next_item.get("title") or getattr(track, "title", "Unknown")
+                    artist = next_item.get("artist") or getattr(track, "author", "Unknown Artist")
+                    
+                    # If this was a Deezer track, update now-playing metadata for lyrics
+                    if "artist" in next_item:
+                        self.deezer_now_playing[guild_id] = (title, artist)
+                    
                     await self._update_voice_status(player, title)
                     await send_log(self.bot, "COMMAND", f"Now playing (queue): `{title}`")
 
@@ -1169,13 +1228,20 @@ class Music(commands.Cog):
 
             # If playing a Deezer CDN track, use stored title as search query
             current_uri = getattr(current_track, "uri", "") or ""
-            if "cdn.discordapp.com" in current_uri or "media.discordapp.net" in current_uri:
+            print(f"[Lyrics] Current track URI: {current_uri[:100] if current_uri else 'None'}")
+            
+            if "cdn.discordapp.com" in current_uri or "media.discordapp.net" in current_uri or "discordapp.net" in current_uri:
                 deezer_meta = self.deezer_now_playing.get(interaction.guild.id)
+                print(f"[Lyrics] CDN URL detected. Deezer metadata: {deezer_meta}")
+                
                 if deezer_meta:
                     query = f"{deezer_meta[0]} {deezer_meta[1]}"
+                    print(f"[Lyrics] Using Deezer search query: {query}")
                 else:
                     await self.send_interaction(interaction, content="❌ Could not determine the current Deezer track for lyrics lookup.")
                     return
+            else:
+                print(f"[Lyrics] Using current track from Lavalink")
 
         data, track_title, _ = await self._fetch_lavalink_lyrics(player, query=query)
         if not data or not data.get("text"):
