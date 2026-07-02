@@ -521,35 +521,35 @@ class Music(commands.Cog):
         except RuntimeError:
             raise
 
-        # Fetch and play via Lavalink (with retry logic)
-        print(f"[CDN] Fetching from Lavalink: {cdn_url[:100]}...")
+        # Wait longer for Discord CDN to be available
+        print(f"[CDN] CDN URL: {cdn_url[:100]}...")
+        print(f"[CDN] Waiting 3 seconds for Discord CDN to be indexed...")
+        await asyncio.sleep(3)
+
+        # Try to create a Playable track from the CDN URL
         track = None
-        
-        for attempt in range(3):  # Try up to 3 times
-            results = await wavelink.Pool.fetch_tracks(cdn_url)
-            print(f"[CDN] Attempt {attempt + 1}: Lavalink results type: {type(results)}, results: {results}")
-            
-            if isinstance(results, list):
-                print(f"[CDN] Results is list with {len(results)} items")
-                if results:  # If we got results, use the first one
-                    track = results[0]
-                    break
-            else:
-                tracks = getattr(results, "tracks", None)
-                print(f"[CDN] Results is object with tracks: {tracks}")
-                if tracks:
-                    track = tracks[0]
-                    break
-            
-            # If no track found, wait and retry
-            if not track and attempt < 2:
-                print(f"[CDN] No track found, retrying in 1 second...")
-                await asyncio.sleep(1)
+        for attempt in range(1, 4):
+            try:
+                # Create a raw Playable track from CDN URL
+                print(f"[CDN] Attempt {attempt}: Creating Playable from CDN URL")
+                track = wavelink.Playable(
+                    uri=cdn_url,
+                    title=title,
+                    author=artist,
+                    length=0,
+                    identifier=cdn_url,
+                    isStream=True,
+                    source="http"
+                )
+                print(f"[CDN] ✓ Playable created successfully")
+                break
+            except Exception as e:
+                print(f"[CDN] ✗ Attempt {attempt} failed: {e}")
+                if attempt < 3:
+                    await asyncio.sleep(1)
 
         if not track:
-            print(f"[CDN] FAILED: Lavalink could not load the audio from Discord CDN after 3 attempts")
-            print(f"[CDN] Final results object: {results}")
-            raise RuntimeError("Lavalink could not load the audio from Discord CDN.")
+            raise RuntimeError("Could not create playable track from CDN URL after 3 attempts")
 
         guild_id = interaction.guild.id
 
@@ -571,7 +571,6 @@ class Music(commands.Cog):
             status = "Now playing"
         
         # ALWAYS call player.play() - Lavalink will queue automatically if needed
-        # Don't add to our custom queue - let Lavalink handle queueing
         print(f"[Deezer] Calling player.play() - Lavalink will queue if needed")
         await player.play(track)
         
@@ -996,14 +995,57 @@ class Music(commands.Cog):
 
         # Check if this is a Deezer query
         if is_deezer_query(query):
-            # === DEEZER PATH: Download via Deemix + play via FFmpeg ===
+            # === DEEZER PATH: Download via Deemix + play via Lavalink CDN ===
             try:
                 file_path, title, artist = await self.download_deezer_track(query)
-                await self.play_via_lavalink_from_file(interaction, file_path, title, artist)
+                try:
+                    await self.play_via_lavalink_from_file(interaction, file_path, title, artist)
+                except Exception as e:
+                    # CDN playback failed, try alternative: search by artist+title on Lavalink
+                    print(f"[Deezer] CDN playback failed: {e}, trying Lavalink search fallback")
+                    try:
+                        await self.ensure_lavalink(interaction)
+                        player = await self.ensure_voice(interaction)
+                        
+                        # Search for the track by artist + title on Lavalink
+                        search_query = f"ytsearch:{title} {artist}"
+                        results = await wavelink.Pool.fetch_tracks(search_query)
+                        track = None
+                        if isinstance(results, list):
+                            track = results[0] if results else None
+                        else:
+                            track = results.tracks[0] if getattr(results, "tracks", None) else None
+                        
+                        if track:
+                            print(f"[Deezer] ✓ Found fallback track on YouTube: {track.title}")
+                            guild_id = interaction.guild.id
+                            await player.play(track)
+                            self.deezer_now_playing[guild_id] = (title, artist)
+                            
+                            embed = discord.Embed(
+                                title="🎧 Now playing (YouTube fallback)",
+                                description=f"**{title}**",
+                                color=0x2b2d31,
+                            )
+                            embed.add_field(name="Channel / Artist", value=f"`{artist}`", inline=True)
+                            embed.set_footer(
+                                text=f"Requested by {interaction.user.display_name} • Via YouTube (Deezer unavailable)",
+                                icon_url=interaction.user.display_avatar.url,
+                            )
+                            await self.send_interaction(interaction, embed=embed)
+                            await send_log(self.bot, "COMMAND", f"Now playing (YouTube fallback): `{title}` by {artist}")
+                        else:
+                            raise RuntimeError("No fallback track found on YouTube")
+                    except Exception as fallback_error:
+                        await self.send_interaction(
+                            interaction,
+                            content=f"❌ Deezer and fallback playback failed: `{fallback_error}`",
+                            ephemeral=True,
+                        )
             except Exception as e:
                 await self.send_interaction(
                     interaction,
-                    content=f"❌ Deezer playback error: `{e}`",
+                    content=f"❌ Deezer download error: `{e}`",
                     ephemeral=True,
                 )
             return
