@@ -1040,7 +1040,6 @@ class Music(commands.Cog):
 
     @discord.app_commands.command(name="skip", description="Skip the current track")
     @discord.app_commands.describe(reason="Skip reason (optional)")
-
     async def skip(self, interaction: discord.Interaction, reason: str = None):
 
         if await blocked(interaction):
