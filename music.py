@@ -282,7 +282,6 @@ class Music(commands.Cog):
         bot.loop.create_task(self.connect_node())
         bot.loop.create_task(self.queue_worker())
 
-    @wavelink.WaveLink.listen()
     async def on_track_end(self, payload: wavelink.TrackEndEvent) -> None:
         """Auto-play next queued track when current one finishes."""
         try:
@@ -944,6 +943,9 @@ class Music(commands.Cog):
         else:
             # Not connected at all, create new connection
             player = await channel.connect(cls=wavelink.Player, self_deaf=True)
+        
+        # Add track-end listener for auto-queue playback
+        player.add_listener(self.on_track_end)
         
         # Store player reference to keep it alive
         self.active_players[guild_id] = player
