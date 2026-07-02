@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from urllib.parse import urlparse
 import collections
 from collections import deque
@@ -274,6 +275,10 @@ class Music(commands.Cog):
 
         # Tracks currently playing via Deezer CDN: guild_id -> (title, artist)
         self.deezer_now_playing: dict[int, tuple[str, str]] = {}
+        
+        # Deezer tracks "currently loaded" (we called player.play() but is_playing may not have updated)
+        # guild_id -> timestamp when track was loaded
+        self.deezer_loaded: dict[int, float] = {}
 
         bot.loop.create_task(self.connect_node())
         bot.loop.create_task(self.queue_worker())
@@ -535,8 +540,15 @@ class Music(commands.Cog):
             should_play_now = not bool(q) and not paused
             print(f"[Deezer] Queue logic: queue_len={len(q)}, paused={paused}, should_play_now={should_play_now}")
 
+        # Check if a Deezer track was recently loaded (within 3 seconds) - race condition check
+        deezer_recently_loaded = guild_id in self.deezer_loaded and (time.time() - self.deezer_loaded[guild_id]) < 3.0
+        if deezer_recently_loaded:
+            print(f"[Deezer] Track recently loaded, treating as 'playing' for queue purposes")
+            should_play_now = False
+
         if should_play_now and not q:
             await player.play(track)
+            self.deezer_loaded[guild_id] = time.time()  # Mark as loaded
             self.deezer_now_playing[interaction.guild.id] = (title, artist)
             status = "Now playing"
             print(f"[Deezer] Playing immediately: {title}")
@@ -727,6 +739,10 @@ class Music(commands.Cog):
 
                     title = next_item.get("title") or getattr(track, "title", "Unknown")
                     artist = next_item.get("artist") or getattr(track, "author", "Unknown Artist")
+                    
+                    # Clear deezer_loaded flag since track is now actually playing
+                    if guild_id in self.deezer_loaded:
+                        del self.deezer_loaded[guild_id]
                     
                     # If this was a Deezer track, update now-playing metadata for lyrics
                     if "artist" in next_item:
