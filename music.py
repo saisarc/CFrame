@@ -33,6 +33,18 @@ def normalize_query_for_lavalink(query: str) -> str:
 
     return f"ytsearch:{q}"
 
+
+def source_to_search_prefix(source: str) -> str:
+    mapping = {
+        "youtube": "ytsearch",
+        "spotify": "spsearch",
+        "apple": "amsearch",
+        "apple music": "amsearch",
+    }
+    source_key = (source or "").strip().lower()
+    return mapping.get(source_key, "ytsearch")
+
+
 def make_embed(title: str, description: str, color: int = 0x2b2d31, thumbnail: str = None) -> discord.Embed:
     """Creates a sleek, modern Discord embed matching the native dark theme."""
     embed = discord.Embed(title=title, description=description, color=color)
@@ -74,15 +86,15 @@ class SourceSelectionView(discord.ui.View):
 
     @discord.ui.button(label="YouTube", style=discord.ButtonStyle.danger, emoji="🔴")
     async def youtube_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_selection(interaction, "ytsearch")
+        await self.handle_selection(interaction, source_to_search_prefix("youtube"))
 
     @discord.ui.button(label="Spotify", style=discord.ButtonStyle.success, emoji="🟢")
     async def spotify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_selection(interaction, "spsearch")
+        await self.handle_selection(interaction, source_to_search_prefix("spotify"))
 
     @discord.ui.button(label="Apple Music", style=discord.ButtonStyle.secondary, emoji="🍎")
     async def apple_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_selection(interaction, "amsearch")
+        await self.handle_selection(interaction, source_to_search_prefix("apple music"))
 
 class Music(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -430,11 +442,13 @@ class Music(commands.Cog):
                     search_query = query
                 else:
                     view = SourceSelectionView(self, interaction, query)
-                    await interaction.response.send_message(
-                        f"🔍 Search query: `{query}`\nSelect the source you want to search on:",
-                        view=view,
-                        ephemeral=True
+                    embed = discord.Embed(
+                        title="🎵 Choose a source",
+                        description=f"Select where to search for **{query}**.",
+                        color=0x2b2d31,
                     )
+                    embed.add_field(name="Options", value="YouTube • Spotify • Apple Music", inline=False)
+                    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
                     return
 
             results = await wavelink.Pool.fetch_tracks(search_query)
