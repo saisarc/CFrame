@@ -37,6 +37,15 @@ async def change_status():
 
 @bot.event
 async def on_ready():
+    # Initialize MongoDB on the correct event loop before anything else
+    if os.getenv("MONGODB_URI"):
+        try:
+            from mongo_store import init_mongo
+            await init_mongo()
+            print("\u2705 MongoDB connected")
+        except Exception as _mongo_err:
+            print(f"\u26a0\ufe0f  MongoDB connection failed: {_mongo_err}")
+
     # Start status task and add cogs with per-cog error handling so we can
     # see which cog (if any) causes startup to fail without the whole process exiting.
     change_status.start()

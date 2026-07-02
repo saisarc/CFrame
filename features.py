@@ -389,7 +389,8 @@ class Features(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
-        settings = get_guild_settings(member.guild.id)
+        # Always load fresh from MongoDB so settings survive redeployments
+        settings = await load_guild_settings(member.guild.id)
         if settings.get("auto_role_ids"):
             for role_id in settings.get("auto_role_ids", []):
                 role = member.guild.get_role(int(role_id))
@@ -646,9 +647,9 @@ class Features(commands.Cog):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need Manage Server permissions.", ephemeral=True)
             return
-        settings = get_guild_settings(interaction.guild_id)
+        settings = await load_guild_settings(interaction.guild_id)
         settings["welcome_channel_id"] = channel.id
-        save_state()
+        await save_guild_settings(interaction.guild_id, settings)
         await interaction.response.send_message(f"✅ Welcome channel set to {channel.mention}.", ephemeral=True)
 
     @discord.app_commands.command(name="setwelcomemessage", description="Set the welcome message shown to new members")
@@ -659,9 +660,9 @@ class Features(commands.Cog):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need Manage Server permissions.", ephemeral=True)
             return
-        settings = get_guild_settings(interaction.guild_id)
+        settings = await load_guild_settings(interaction.guild_id)
         settings["welcome_message"] = message
-        save_state()
+        await save_guild_settings(interaction.guild_id, settings)
         await interaction.response.send_message("✅ Welcome message updated.", ephemeral=True)
 
     @discord.app_commands.command(name="disablewelcome", description="Turn welcome messages on or off")
@@ -672,9 +673,9 @@ class Features(commands.Cog):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need Manage Server permissions.", ephemeral=True)
             return
-        settings = get_guild_settings(interaction.guild_id)
+        settings = await load_guild_settings(interaction.guild_id)
         settings["welcome_enabled"] = enabled
-        save_state()
+        await save_guild_settings(interaction.guild_id, settings)
         await interaction.response.send_message(f"✅ Welcome messages {'enabled' if enabled else 'disabled'}.", ephemeral=True)
 
     @discord.app_commands.command(name="welcometest", description="Send a test welcome message")
