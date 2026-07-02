@@ -261,6 +261,13 @@ class Music(commands.Cog):
         self.repeat_modes = {}  # guild_id -> 'off'|'one'|'all'
         self.volumes = {}       # guild_id -> int
 
+        # Deezer session cache: track_id (str) -> local file path
+        # Avoids re-downloading the same track within a session
+        self.deezer_track_cache: dict[str, str] = {}
+
+        # Tracks currently playing via Deezer CDN: guild_id -> (title, artist)
+        self.deezer_now_playing: dict[int, tuple[str, str]] = {}
+
         bot.loop.create_task(self.connect_node())
         bot.loop.create_task(self.queue_worker())
 
@@ -305,6 +312,33 @@ class Music(commands.Cog):
             deezer_url = query.split("?")[0]
         else:
             deezer_url = f"https://www.deezer.com/track/{query}"
+
+        # Extract a stable cache key from the track ID in the URL
+        try:
+            cache_key = deezer_url.rstrip("/").split("/track/")[-1]
+        except Exception:
+            cache_key = query
+
+        # Return cached file if it still exists on disk
+        if cache_key in self.deezer_track_cache:
+            cached_path = self.deezer_track_cache[cache_key]
+            if Path(cached_path).exists():
+                print(f"[Deemix] Cache hit for track {cache_key}: {cached_path}")
+                # Re-fetch metadata quickly without re-downloading
+                title, artist = "Unknown", "Unknown Artist"
+                try:
+                    def _get_meta():
+                        dz = DeezerClient()
+                        dz.login_via_arl(arl_token)
+                        t = dz.api.get_track(int(cache_key))
+                        return t.get("title", "Unknown"), t.get("artist", {}).get("name", "Unknown Artist")
+                    title, artist = await asyncio.to_thread(_get_meta)
+                except Exception:
+                    pass
+                return (cached_path, title, artist)
+            else:
+                # File was wiped (redeploy), remove stale entry
+                del self.deezer_track_cache[cache_key]
 
         def _do_download():
             import time
@@ -386,7 +420,10 @@ class Music(commands.Cog):
             return (str(list(new_files)[0]), title, artist)
 
         try:
-            return await asyncio.to_thread(_do_download)
+            result = await asyncio.to_thread(_do_download)
+            # Store in session cache so the same track isn't re-downloaded
+            self.deezer_track_cache[cache_key] = result[0]
+            return result
         except RuntimeError:
             raise
         except Exception as e:
@@ -440,6 +477,7 @@ class Music(commands.Cog):
 
         if not is_playing and not q:
             await player.play(track)
+            self.deezer_now_playing[interaction.guild.id] = (title, artist)
             status = "Now playing"
         else:
             q.append({
@@ -1128,6 +1166,16 @@ class Music(commands.Cog):
             if not current_track:
                 await self.send_interaction(interaction, content="❌ Nothing is currently playing.")
                 return
+
+            # If playing a Deezer CDN track, use stored title as search query
+            current_uri = getattr(current_track, "uri", "") or ""
+            if "cdn.discordapp.com" in current_uri or "media.discordapp.net" in current_uri:
+                deezer_meta = self.deezer_now_playing.get(interaction.guild.id)
+                if deezer_meta:
+                    query = f"{deezer_meta[0]} {deezer_meta[1]}"
+                else:
+                    await self.send_interaction(interaction, content="❌ Could not determine the current Deezer track for lyrics lookup.")
+                    return
 
         data, track_title, _ = await self._fetch_lavalink_lyrics(player, query=query)
         if not data or not data.get("text"):
