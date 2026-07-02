@@ -33,12 +33,11 @@ plugins:
     providers:
       - "spsearch:%QUERY%"
       - "amsearch:%QUERY%"
-      - "dzsearch:%QUERY%"
       - "ytsearch:%QUERY%"
     sources:
       spotify: true
       applemusic: true
-      deezer: true
+      deezer: false
     spotify:
       clientId: "${SPOTIFY_CLIENT_ID:}"
       clientSecret: "${SPOTIFY_CLIENT_SECRET:}"
@@ -46,6 +45,7 @@ plugins:
     applemusic:
       countryCode: "US"
     deezer:
+      masterKey: "${DEEZER_MASTER_KEY:}"
       countryCode: "US"
   lavalyrics:
     sources:

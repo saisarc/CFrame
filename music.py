@@ -610,7 +610,14 @@ class Music(commands.Cog):
                 await self.send_interaction(interaction, content="❌ No Deezer/DeeMix track found for that query.")
                 return
         except Exception as error:
-            await self.send_interaction(interaction, content=f"❌ Could not resolve Deezer playback: `{error}`")
+            message = str(error).lower()
+            if "master key" in message or "deezer" in message:
+                await self.send_interaction(
+                    interaction,
+                    content="❌ Deezer/DeeMix is not available yet because your Lavalink server is missing a Deezer master key. Add `DEEZER_MASTER_KEY` and re-enable the Deezer source in Lavalink, then restart the service.",
+                )
+            else:
+                await self.send_interaction(interaction, content=f"❌ Could not resolve Deezer playback: `{error}`")
             return
 
         await self.process_play_track(interaction, track)
