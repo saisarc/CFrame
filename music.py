@@ -300,6 +300,9 @@ class Music(commands.Cog):
         # Track active players per guild to support simultaneous music playback
         self.active_players: dict[int, wavelink.Player] = {}
 
+        # Track last playing track per guild to detect track changes
+        self.last_playing_track: dict[int, str] = {}  # guild_id -> track.identifier
+
         bot.loop.create_task(self.connect_node())
         bot.loop.create_task(self.queue_worker())
 
@@ -816,6 +819,8 @@ class Music(commands.Cog):
 
     def _get_voice_channel_and_store_original(self, guild: discord.Guild, voice_channel: discord.VoiceChannel):
         st = self.voice_status.setdefault(guild.id, {})
+        if "original_name" not in st:
+            st["original_name"] = voice_channel.name
         if "voice_status_enabled" not in st:
             st["voice_status_enabled"] = False
         if "voice_status_suffix" not in st:
@@ -833,16 +838,16 @@ class Music(commands.Cog):
 
         channel = player.channel
         suffix = st.get("voice_status_suffix") or "🎵 {title}"
-        # Discord channel status limit is 500 characters.
-        status_text = suffix.replace('{title}', track_title)
-        if len(status_text) > 500:
-            status_text = status_text[:497] + "..."
+        # Discord channel name limit is 100 characters.
+        new_name = f"{st.get('original_name', channel.name)} | {suffix.replace('{title}', track_title)}"
+        if len(new_name) > 100:
+            new_name = new_name[:97] + "..."
 
         try:
-            if channel.status != status_text:
-                await channel.edit(status=status_text)
+            if channel.name != new_name:
+                await channel.edit(name=new_name)
         except Exception as e:
-            print(f"[Voice Status] Failed to update status: {e}")
+            print(f"[Voice Status] Failed to update name: {e}")
 
     async def _restore_voice_status(self, guild: discord.Guild):
         st = self.voice_status.get(guild.id)
@@ -851,11 +856,14 @@ class Music(commands.Cog):
         player = self.active_players.get(guild.id)
         if not player or not player.channel:
             return
+        original = st.get("original_name")
+        if not original:
+            return
         try:
-            if player.channel.status:
-                await player.channel.edit(status=None)
+            if player.channel.name != original:
+                await player.channel.edit(name=original)
         except Exception as e:
-            print(f"[Voice Status] Failed to clear status: {e}")
+            print(f"[Voice Status] Failed to restore name: {e}")
 
     async def queue_worker(self):
         await self.bot.wait_until_ready()
@@ -866,11 +874,31 @@ class Music(commands.Cog):
                     guild = self.bot.get_guild(guild_id)
                     if not guild or not guild.voice_client:
                         self.active_players.pop(guild_id, None)
+                        self.last_playing_track.pop(guild_id, None)
                         continue
                     
                     player = self.active_players[guild_id]
                     if not player or not player.connected:
                         self.active_players.pop(guild_id, None)
+                        self.last_playing_track.pop(guild_id, None)
+                
+                # Update voice channel name when track changes
+                for guild_id, player in list(self.active_players.items()):
+                    try:
+                        if player and player.connected and player.playing and player.current:
+                            current_track_id = getattr(player.current, 'identifier', None) or getattr(player.current, 'uri', None)
+                            last_track_id = self.last_playing_track.get(guild_id)
+                            
+                            # Track changed, update voice channel name
+                            if current_track_id and current_track_id != last_track_id:
+                                self.last_playing_track[guild_id] = current_track_id
+                                track_title = getattr(player.current, 'title', 'Unknown')
+                                
+                                # Restore original name first, then apply new suffix
+                                await self._restore_voice_status(player.guild)
+                                await self._update_voice_status(player, track_title)
+                    except Exception as e:
+                        print(f"[Queue] Error updating voice status for guild {guild_id}: {e}")
                 
                 # Auto-play next queued track from Wavelink queue if nothing is playing
                 for guild_id, player in list(self.active_players.items()):
