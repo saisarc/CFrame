@@ -399,14 +399,21 @@ class Music(commands.Cog):
         }
 
         if should_play_now and not q:
-            await player.play(track)
-            title = item["title"]
             try:
-                self._get_voice_channel_and_store_original(interaction.guild, player.channel)
-            except Exception:
-                pass
-            await self._update_voice_status(player, title)
-            status_text = "Now playing"
+                await player.play(track)
+                title = item["title"]
+                try:
+                    self._get_voice_channel_and_store_original(interaction.guild, player.channel)
+                except Exception:
+                    pass
+                await self._update_voice_status(player, title)
+                status_text = "Now playing"
+            except Exception as play_error:
+                await self.send_interaction(
+                    interaction,
+                    content="⚠️ That track could not be played by Lavalink. Please try a different query or source.",
+                )
+                return
         else:
             q.append(item)
             status_text = "Added to queue"
@@ -468,15 +475,7 @@ class Music(commands.Cog):
                 if query.lower().startswith(("ytsearch:", "spsearch:", "amsearch:", "dzsearch:")):
                     search_query = query
                 else:
-                    view = SourceSelectionView(self, interaction, query)
-                    embed = discord.Embed(
-                        title="🎵 Choose a source",
-                        description=f"Select where to search for **{query}**.",
-                        color=0x2b2d31,
-                    )
-                    embed.add_field(name="Options", value="YouTube • Spotify • Apple Music", inline=False)
-                    await self.send_interaction(interaction, embed=embed, ephemeral=True, view=view)
-                    return
+                    search_query = f"ytsearch:{query}"
 
             results = await wavelink.Pool.fetch_tracks(search_query)
             track = None
