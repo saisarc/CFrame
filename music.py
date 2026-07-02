@@ -386,15 +386,32 @@ class Music(commands.Cog):
             listener = _DeemixListener()
             DeemixDownloader(dz, dl_obj, settings, listener).start()
 
-            # Wait for deemix to download the file (up to 15 seconds)
+            # Wait for deemix to download the file (up to 20 seconds)
             print(f"[Deemix] Waiting for download to complete...")
-            for attempt in range(150):  # 15 seconds with 0.1s checks
+            file_found = False
+            for attempt in range(200):  # 20 seconds with 0.1s checks
                 time.sleep(0.1)
+                
+                # Check if listener got the download-complete event
                 if listener.completed:
                     print(f"[Deemix] Download event received after {attempt * 0.1:.1f}s")
-                    break
-            else:
-                print(f"[Deemix] Timeout waiting for download event (15s), proceeding with file detection")
+                    
+                    # Give filesystem a moment to write the file to disk
+                    time.sleep(0.5)
+                    
+                    # Check if a file actually appears in cache_dir now
+                    audio_exts = {".mp3", ".flac", ".m4a", ".ogg", ".opus"}
+                    for f in cache_dir.rglob("*"):
+                        if f.is_file() and f.suffix.lower() in audio_exts:
+                            print(f"[Deemix] File detected on disk: {f.name}")
+                            file_found = True
+                            break
+                    
+                    if file_found:
+                        break
+                    
+            if not file_found:
+                print(f"[Deemix] Did not see download event or file, will retry with file detection")
 
             # Strategy 1: time-based detection with a 3s buffer for clock skew
             def _new_files_in(path: Path):
@@ -501,74 +518,62 @@ class Music(commands.Cog):
         except RuntimeError:
             raise
 
-        # Fetch and play via Lavalink
+        # Fetch and play via Lavalink (with retry logic)
         print(f"[CDN] Fetching from Lavalink: {cdn_url[:100]}...")
-        results = await wavelink.Pool.fetch_tracks(cdn_url)
-        print(f"[CDN] Lavalink results type: {type(results)}, results: {results}")
-        
         track = None
-        if isinstance(results, list):
-            print(f"[CDN] Results is list with {len(results)} items")
-            track = results[0] if results else None
-        else:
-            tracks = getattr(results, "tracks", None)
-            print(f"[CDN] Results is object with tracks: {tracks}")
-            track = tracks[0] if tracks else None
+        
+        for attempt in range(3):  # Try up to 3 times
+            results = await wavelink.Pool.fetch_tracks(cdn_url)
+            print(f"[CDN] Attempt {attempt + 1}: Lavalink results type: {type(results)}, results: {results}")
+            
+            if isinstance(results, list):
+                print(f"[CDN] Results is list with {len(results)} items")
+                if results:  # If we got results, use the first one
+                    track = results[0]
+                    break
+            else:
+                tracks = getattr(results, "tracks", None)
+                print(f"[CDN] Results is object with tracks: {tracks}")
+                if tracks:
+                    track = tracks[0]
+                    break
+            
+            # If no track found, wait and retry
+            if not track and attempt < 2:
+                print(f"[CDN] No track found, retrying in 1 second...")
+                await asyncio.sleep(1)
 
         if not track:
-            print(f"[CDN] FAILED: Lavalink could not load the audio from Discord CDN")
-            print(f"[CDN] Full results object: {results}")
+            print(f"[CDN] FAILED: Lavalink could not load the audio from Discord CDN after 3 attempts")
+            print(f"[CDN] Final results object: {results}")
             raise RuntimeError("Lavalink could not load the audio from Discord CDN.")
 
         guild_id = interaction.guild.id
-        q = self.get_queue(guild_id)
 
         # Check if something is already playing or queued in Lavalink
-        # These are more reliable than is_playing() which may not update immediately
-        lavalink_has_content = False
-        
-        # Check 1: Is there a current track in Lavalink?
         current_track = getattr(player, "current", None)
-        if current_track:
-            lavalink_has_content = True
-            print(f"[Deezer] ✓ Lavalink has current track: {getattr(current_track, 'title', 'Unknown')}")
-        
-        # Check 2: Does Lavalink's queue have items?
         lavalink_queue = getattr(player, "queue", None)
-        if lavalink_queue and len(lavalink_queue) > 0:
-            lavalink_has_content = True
-            print(f"[Deezer] ✓ Lavalink queue has {len(lavalink_queue)} items")
         
-        # Check 3: Do we have items in our own queue?
-        if len(q) > 0:
-            lavalink_has_content = True
-            print(f"[Deezer] ✓ Our queue has {len(q)} items")
+        is_playing = current_track is not None
+        has_queued = lavalink_queue and len(lavalink_queue) > 0
         
-        print(f"[Deezer] Lavalink content check: has_content={lavalink_has_content}")
-        
-        # Always call player.play() - Lavalink will queue automatically if needed
-        # Just use it to determine the response message
-        if lavalink_has_content:
-            print(f"[Deezer] Queuing: {title}")
+        if is_playing:
+            print(f"[Deezer] ✓ Currently playing: {getattr(current_track, 'title', 'Unknown')}, will QUEUE")
             status = "Added to queue"
-            q.append({
-                "track": track,
-                "title": title,
-                "artist": artist,
-                "uri": cdn_url,
-                "requester_id": interaction.user.id,
-                "requester_name": interaction.user.display_name,
-            })
-            # Store metadata for lyrics even if queued
-            self.deezer_now_playing[interaction.guild.id] = (title, artist)
-            print(f"[Deezer] Queued: {title} (queue will have {len(q) + 1} items)")
+        elif has_queued:
+            print(f"[Deezer] ✓ Queue has {len(lavalink_queue)} items, will QUEUE")
+            status = "Added to queue"
         else:
-            print(f"[Deezer] Playing immediately: {title}")
+            print(f"[Deezer] Nothing playing/queued, will PLAY immediately")
             status = "Now playing"
-            self.deezer_now_playing[interaction.guild.id] = (title, artist)
         
-        # Always call player.play() - Lavalink handles queueing automatically
+        # ALWAYS call player.play() - Lavalink will queue automatically if needed
+        # Don't add to our custom queue - let Lavalink handle queueing
+        print(f"[Deezer] Calling player.play() - Lavalink will queue if needed")
         await player.play(track)
+        
+        # Store metadata for lyrics
+        self.deezer_now_playing[guild_id] = (title, artist)
 
         embed = discord.Embed(
             title="🎧 Now playing" if status != "Added to queue" else "📥 Added to Queue",
@@ -1102,25 +1107,54 @@ class Music(commands.Cog):
         await interaction.response.send_message("✅ Restored original voice channel name.", ephemeral=True)
 
     @discord.app_commands.command(name="queue", description="Show the current music queue")
-
     async def queue(self, interaction: discord.Interaction):
-
         if await blocked(interaction):
             return
-        queue = self.get_queue(interaction.guild.id)
-        if not queue:
+        
+        voice_client = interaction.guild.voice_client
+        if not voice_client or not isinstance(voice_client, wavelink.Player):
+            await interaction.response.send_message("❌ Bot is not in a voice channel.", ephemeral=True)
+            return
+        
+        player = voice_client
+        
+        # Get current track
+        current_track = getattr(player, "current", None)
+        
+        # Get Lavalink's queue
+        lavalink_queue = getattr(player, "queue", None) or []
+        
+        # Get our custom queue (for YouTube/Spotify/etc)
+        custom_queue = self.get_queue(interaction.guild.id)
+        
+        lines = []
+        
+        # Add current track
+        if current_track:
+            title = getattr(current_track, "title", "Unknown")
+            lines.append(f"**▶️ Now Playing:** {title}")
+        
+        # Add Lavalink queued items
+        for idx, track in enumerate(lavalink_queue):
+            title = getattr(track, "title", "Unknown")
+            lines.append(f"`{idx + 1}.` **{title}**")
+        
+        # Add custom queue items (from /play with YouTube/Spotify)
+        if custom_queue:
+            start_idx = len(lavalink_queue)
+            for idx, item in enumerate(custom_queue):
+                title = item.get("title") or getattr(item.get("track"), "title", "Unknown")
+                lines.append(f"`{start_idx + idx + 1}.` {title}")
+        
+        if not lines:
             await interaction.response.send_message("☕ **The queue is completely empty.**", ephemeral=True)
             return
-            
-        lines = []
-        for idx, item in enumerate(queue):
-            title = item.get("title") or getattr(item.get("track"), "title", "Unknown")
-            lines.append(f"`{idx + 1}.` **{title}**")
-
+        
         embed = make_embed("📜 Upcoming Tracks", "\n".join(lines[:10]))
         
-        if len(lines) > 10:
-            embed.add_field(name="Remaining", value=f"*...and {len(lines) - 10} more tracks waiting.*", inline=False)
+        total_queued = len(lavalink_queue) + len(custom_queue)
+        if total_queued > 10:
+            embed.add_field(name="Remaining", value=f"*...and {total_queued - 9} more tracks waiting.*", inline=False)
             
         await interaction.response.send_message(embed=embed)
 
