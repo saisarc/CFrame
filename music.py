@@ -205,6 +205,8 @@ class Music(commands.Cog):
 
         # Track last playing track per guild to detect track changes
         self.last_playing_track: dict[int, str] = {}  # guild_id -> track.identifier
+        self.idle_since: dict[int, float] = {}          # guild_id -> timestamp when idle started
+        self._last_text_channel: dict[int, int] = {}    # guild_id -> channel_id for idle messages
 
         bot.loop.create_task(self.connect_node())
         bot.loop.create_task(self.queue_worker())
@@ -694,6 +696,10 @@ class Music(commands.Cog):
             return False
 
     async def send_interaction(self, interaction: discord.Interaction, content: str = None, embed: discord.Embed = None, ephemeral: bool = False, view: discord.ui.View = None):
+        # Track last text channel per guild for idle disconnect messages
+        if interaction.guild and interaction.channel:
+            self._last_text_channel[interaction.guild.id] = interaction.channel.id
+
         kwargs = {"ephemeral": ephemeral}
         if content:
             kwargs["content"] = content
@@ -818,6 +824,31 @@ class Music(commands.Cog):
                                 if next_track:
                                     print(f"[Queue] Auto-playing next track: {next_track.title}")
                                     await player.play(next_track)
+                                    self.idle_since.pop(guild_id, None)
+                            else:
+                                # Nothing playing and queue empty — track idle time
+                                import time as _time
+                                if guild_id not in self.idle_since:
+                                    self.idle_since[guild_id] = _time.time()
+                                elif _time.time() - self.idle_since[guild_id] > 300:  # 5 min idle
+                                    guild = self.bot.get_guild(guild_id)
+                                    print(f"[Queue] Auto-disconnecting guild {guild_id} after 5 min idle")
+                                    await self._restore_voice_status(player.guild)
+                                    await player.disconnect()
+                                    self.active_players.pop(guild_id, None)
+                                    self.idle_since.pop(guild_id, None)
+                                    if guild:
+                                        # Find the text channel the bot last interacted in
+                                        ch_id = self._last_text_channel.get(guild_id)
+                                        ch = guild.get_channel(ch_id) if ch_id else None
+                                        if ch:
+                                            embed = discord.Embed(description="Left the voice channel after 5 minutes of inactivity.", color=0x2b2d31)
+                                            try:
+                                                await ch.send(embed=embed)
+                                            except Exception:
+                                                pass
+                        else:
+                            self.idle_since.pop(guild_id, None)
                     except Exception as e:
                         print(f"[Queue] Error checking auto-play for guild {guild_id}: {e}")
                 
@@ -1114,6 +1145,110 @@ class Music(commands.Cog):
             except Exception as e:
                 await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
 
+    @discord.app_commands.command(name="nowplaying", description="Show what's currently playing with a progress bar")
+    async def nowplaying(self, interaction: discord.Interaction):
+        if await blocked(interaction):
+            return
+        guild_id = interaction.guild.id
+        player = self.active_players.get(guild_id)
+        if not player or not player.playing or not player.current:
+            await interaction.response.send_message("❌ Nothing is playing right now.", ephemeral=True)
+            return
+
+        track = player.current
+        title = getattr(track, "title", "Unknown")
+        author = getattr(track, "author", "Unknown Artist")
+        uri = getattr(track, "uri", None)
+        artwork = getattr(track, "artwork", None)
+        duration_ms = getattr(track, "length", 0) or 0
+        position_ms = getattr(player, "position", 0) or 0
+
+        def fmt_time(ms: int) -> str:
+            s = int(ms / 1000)
+            m, s = divmod(s, 60)
+            h, m = divmod(m, 60)
+            return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+        BAR_LEN = 20
+        if duration_ms > 0:
+            filled = int((position_ms / duration_ms) * BAR_LEN)
+            bar = "█" * filled + "░" * (BAR_LEN - filled)
+            time_str = f"`{fmt_time(position_ms)} {bar} {fmt_time(duration_ms)}`"
+        else:
+            time_str = "`Live stream`"
+
+        # Detect source
+        if uri:
+            if "deezer" in uri or "deezer" in title.lower():
+                source = "Deezer"
+            elif "youtube" in uri or "youtu.be" in uri:
+                source = "YouTube"
+            elif "spotify" in uri:
+                source = "Spotify"
+            else:
+                source = "Audio"
+        else:
+            dz = self.deezer_now_playing.get(guild_id)
+            source = "Deezer" if dz and dz[0] == title else "Audio"
+
+        dz = self.deezer_now_playing.get(guild_id)
+        if dz and dz[0] == title:
+            author = dz[1]
+
+        vol = self.volumes.get(guild_id, 100)
+        repeat = self.repeat_modes.get(guild_id, "off")
+
+        embed = discord.Embed(color=0x1DB954)
+        embed.set_author(name=f"Now Playing  ·  {source}")
+        embed.description = f"### [{title}]({uri})\n{author}" if uri else f"### {title}\n{author}"
+        embed.description += f"\n\n{time_str}"
+        embed.add_field(name="Volume", value=f"{vol}%", inline=True)
+        embed.add_field(name="Repeat", value=repeat.capitalize(), inline=True)
+        queue_len = len(player.queue) if player.queue else 0
+        if queue_len:
+            embed.add_field(name="Up Next", value=f"{queue_len} track{'s' if queue_len != 1 else ''}", inline=True)
+        if artwork:
+            embed.set_image(url=artwork)
+        embed.set_footer(text=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
+
+    @discord.app_commands.command(name="seek", description="Seek to a position in the current track")
+    @discord.app_commands.describe(position="Position to seek to, e.g. 1:30 or 90")
+    async def seek(self, interaction: discord.Interaction, position: str):
+        if await blocked(interaction):
+            return
+        guild_id = interaction.guild.id
+        player = self.active_players.get(guild_id)
+        if not player or not player.playing:
+            await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
+            return
+
+        # Parse position: supports "1:30", "1:30:00", or plain seconds "90"
+        try:
+            parts = position.strip().split(":")
+            if len(parts) == 1:
+                seconds = int(parts[0])
+            elif len(parts) == 2:
+                seconds = int(parts[0]) * 60 + int(parts[1])
+            else:
+                seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            position_ms = seconds * 1000
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid format. Use `1:30` or `90`.", ephemeral=True)
+            return
+
+        duration_ms = getattr(player.current, "length", 0) or 0
+        if duration_ms and position_ms > duration_ms:
+            await interaction.response.send_message("❌ Position is beyond the track length.", ephemeral=True)
+            return
+
+        await player.seek(position_ms)
+        m, s = divmod(seconds, 60)
+        h, m = divmod(m, 60)
+        ts = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+        embed = discord.Embed(description=f"⏩ Seeked to **{ts}**", color=0x1DB954)
+        await interaction.response.send_message(embed=embed)
+
     @discord.app_commands.command(name="skip", description="Skip the current track")
     @discord.app_commands.describe(reason="Skip reason (optional)")
     async def skip(self, interaction: discord.Interaction, reason: str = None):
@@ -1219,53 +1354,86 @@ class Music(commands.Cog):
     async def queue(self, interaction: discord.Interaction):
         if await blocked(interaction):
             return
-        
-        voice_client = interaction.guild.voice_client
-        if not voice_client or not isinstance(voice_client, wavelink.Player):
+
+        guild_id = interaction.guild.id
+        player = self.active_players.get(guild_id)
+        if not player:
             await interaction.response.send_message("❌ Bot is not in a voice channel.", ephemeral=True)
             return
-        
-        player = voice_client
-        
-        # Get current track
+
         current_track = getattr(player, "current", None)
-        
-        # Get Lavalink's queue
-        lavalink_queue = getattr(player, "queue", None) or []
-        
-        # Get our custom queue (for YouTube/Spotify/etc)
-        custom_queue = self.get_queue(interaction.guild.id)
-        
-        lines = []
-        
-        # Add current track
-        if current_track:
-            title = getattr(current_track, "title", "Unknown")
-            lines.append(f"**▶️ Now Playing:** {title}")
-        
-        # Add Lavalink queued items
-        for idx, track in enumerate(lavalink_queue):
-            title = getattr(track, "title", "Unknown")
-            lines.append(f"`{idx + 1}.` **{title}**")
-        
-        # Add custom queue items (from /play with YouTube/Spotify)
-        if custom_queue:
-            start_idx = len(lavalink_queue)
-            for idx, item in enumerate(custom_queue):
-                title = item.get("title") or getattr(item.get("track"), "title", "Unknown")
-                lines.append(f"`{start_idx + idx + 1}.` {title}")
-        
-        if not lines:
-            await interaction.response.send_message("☕ **The queue is completely empty.**", ephemeral=True)
+        lavalink_queue = list(getattr(player, "queue", None) or [])
+        custom_queue = list(self.get_queue(guild_id))
+
+        all_queued = lavalink_queue + [i.get("track") for i in custom_queue if i.get("track")]
+        all_titles = (
+            [getattr(t, "title", "Unknown") for t in lavalink_queue] +
+            [i.get("title") or getattr(i.get("track"), "title", "Unknown") for i in custom_queue]
+        )
+
+        if not current_track and not all_queued:
+            await interaction.response.send_message("☕ The queue is empty.", ephemeral=True)
             return
-        
-        embed = make_embed("📜 Upcoming Tracks", "\n".join(lines[:10]))
-        
-        total_queued = len(lavalink_queue) + len(custom_queue)
-        if total_queued > 10:
-            embed.add_field(name="Remaining", value=f"*...and {total_queued - 9} more tracks waiting.*", inline=False)
-            
-        await interaction.response.send_message(embed=embed)
+
+        PAGE_SIZE = 10
+        pages: list[discord.Embed] = []
+        total = len(all_titles)
+
+        def fmt_time(ms: int) -> str:
+            if not ms:
+                return ""
+            s = int(ms / 1000)
+            m, s = divmod(s, 60)
+            h, m = divmod(m, 60)
+            return f" `{h}:{m:02d}:{s:02d}`" if h else f" `{m}:{s:02d}`"
+
+        # Build pages
+        chunks = [all_titles[i:i + PAGE_SIZE] for i in range(0, max(total, 1), PAGE_SIZE)] or [[]]
+        for page_num, chunk in enumerate(chunks):
+            embed = discord.Embed(color=0x2b2d31)
+            embed.set_author(name=f"Queue  ·  {total} track{'s' if total != 1 else ''}")
+            lines = []
+            if page_num == 0 and current_track:
+                ct = getattr(current_track, "title", "Unknown")
+                dur = fmt_time(getattr(current_track, "length", 0))
+                lines.append(f"**▶  {ct}**{dur}")
+                lines.append("")
+            for i, title in enumerate(chunk):
+                num = page_num * PAGE_SIZE + i + 1
+                t = all_titles[page_num * PAGE_SIZE + i] if page_num * PAGE_SIZE + i < len(all_titles) else title
+                track_obj = all_queued[page_num * PAGE_SIZE + i] if page_num * PAGE_SIZE + i < len(all_queued) else None
+                dur = fmt_time(getattr(track_obj, "length", 0)) if track_obj else ""
+                lines.append(f"`{num}.` {title}{dur}")
+            embed.description = "\n".join(lines)
+            embed.set_footer(text=f"Page {page_num + 1}/{len(chunks)}")
+            pages.append(embed)
+
+        if len(pages) == 1:
+            await interaction.response.send_message(embed=pages[0])
+            return
+
+        class QueuePaginator(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=120)
+                self.page = 0
+
+            @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+            async def prev(self, btn_interaction: discord.Interaction, button: discord.ui.Button):
+                if btn_interaction.user.id != interaction.user.id:
+                    await btn_interaction.response.defer()
+                    return
+                self.page = (self.page - 1) % len(pages)
+                await btn_interaction.response.edit_message(embed=pages[self.page], view=self)
+
+            @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+            async def next_btn(self, btn_interaction: discord.Interaction, button: discord.ui.Button):
+                if btn_interaction.user.id != interaction.user.id:
+                    await btn_interaction.response.defer()
+                    return
+                self.page = (self.page + 1) % len(pages)
+                await btn_interaction.response.edit_message(embed=pages[self.page], view=self)
+
+        await interaction.response.send_message(embed=pages[0], view=QueuePaginator())
 
     @discord.app_commands.command(name="deemix", description="Play a Deezer/DeeMix track or search query via Lavalink")
     @discord.app_commands.describe(query="Deezer/DeeMix link or search query")

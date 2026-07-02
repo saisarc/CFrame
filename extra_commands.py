@@ -1,7 +1,11 @@
 import os
+import random
+import asyncio
+import re
+from datetime import datetime, timezone
 import discord
 from groq import AsyncGroq
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from commands import send_log, disabled_cmds, blocked
 from help_ui import HELP_PAGES, HelpPaginator
@@ -307,3 +311,193 @@ class ExtraCommands(commands.Cog):
         else:
             await interaction.response.send_message(
                 "❌ Invalid action. Use `view`, `add`, `update`, `remove`, or `clear`.", ephemeral=True)
+
+    # ── /8ball ────────────────────────────────────────────────────────────────
+    _8BALL_RESPONSES = [
+        ("It is certain.", 0x57F287), ("It is decidedly so.", 0x57F287),
+        ("Without a doubt.", 0x57F287), ("Yes, definitely.", 0x57F287),
+        ("You may rely on it.", 0x57F287), ("As I see it, yes.", 0x57F287),
+        ("Most likely.", 0x57F287), ("Outlook good.", 0x57F287),
+        ("Signs point to yes.", 0x57F287),
+        ("Reply hazy, try again.", 0xFEE75C), ("Ask again later.", 0xFEE75C),
+        ("Better not tell you now.", 0xFEE75C), ("Cannot predict now.", 0xFEE75C),
+        ("Concentrate and ask again.", 0xFEE75C),
+        ("Don't count on it.", 0xED4245), ("My reply is no.", 0xED4245),
+        ("My sources say no.", 0xED4245), ("Outlook not so good.", 0xED4245),
+        ("Very doubtful.", 0xED4245),
+    ]
+
+    @discord.app_commands.command(name="8ball", description="Ask the magic 8 ball a question")
+    @discord.app_commands.describe(question="Your yes/no question")
+    async def eightball(self, interaction: discord.Interaction, question: str):
+        if await blocked(interaction): return
+        answer, color = random.choice(self._8BALL_RESPONSES)
+        embed = discord.Embed(color=color)
+        embed.set_author(name="Magic 8-Ball", icon_url="https://upload.wikimedia.org/wikipedia/commons/thumb/e/eb/Magic_eight_ball.png/240px-Magic_eight_ball.png")
+        embed.add_field(name="Question", value=question, inline=False)
+        embed.add_field(name="Answer", value=f"🎱  {answer}", inline=False)
+        embed.set_footer(text=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
+
+    # ── /poll ─────────────────────────────────────────────────────────────────
+    @discord.app_commands.command(name="poll", description="Create a quick poll with up to 4 options")
+    @discord.app_commands.describe(
+        question="The poll question",
+        option1="First option", option2="Second option",
+        option3="Third option (optional)", option4="Fourth option (optional)"
+    )
+    async def poll(self, interaction: discord.Interaction, question: str, option1: str, option2: str, option3: str = None, option4: str = None):
+        if await blocked(interaction): return
+        options = [o for o in [option1, option2, option3, option4] if o]
+        emojis = ["🇦", "🇧", "🇨", "🇩"]
+        lines = [f"{emojis[i]}  {opt}" for i, opt in enumerate(options)]
+        embed = discord.Embed(
+            title=f"📊  {question}",
+            description="\n\n".join(lines),
+            color=0x5865F2,
+        )
+        embed.set_footer(text=f"Poll by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
+        msg = await interaction.original_response()
+        for i in range(len(options)):
+            await msg.add_reaction(emojis[i])
+
+    # ── /remind ───────────────────────────────────────────────────────────────
+    @discord.app_commands.command(name="remind", description="Set a reminder — the bot will DM you")
+    @discord.app_commands.describe(time="Duration, e.g. 10m, 2h, 1d", message="What to remind you about")
+    async def remind(self, interaction: discord.Interaction, time: str, message: str):
+        if await blocked(interaction): return
+        # Parse duration
+        match = re.fullmatch(r"(\d+)(s|m|h|d)", time.strip().lower())
+        if not match:
+            await interaction.response.send_message("❌ Invalid format. Use `10m`, `2h`, `1d`, etc.", ephemeral=True)
+            return
+        amount, unit = int(match.group(1)), match.group(2)
+        seconds = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit] * amount
+        if seconds > 86400 * 7:
+            await interaction.response.send_message("❌ Max reminder time is 7 days.", ephemeral=True)
+            return
+        unit_names = {"s": "second", "m": "minute", "h": "hour", "d": "day"}
+        label = f"{amount} {unit_names[unit]}{'s' if amount != 1 else ''}"
+        embed = discord.Embed(description=f"⏰  I'll remind you in **{label}**.", color=0x5865F2)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        async def _send_reminder():
+            await asyncio.sleep(seconds)
+            try:
+                remind_embed = discord.Embed(
+                    title="⏰  Reminder",
+                    description=message,
+                    color=0x5865F2,
+                    timestamp=datetime.now(timezone.utc),
+                )
+                remind_embed.set_footer(text=f"Set {label} ago")
+                await interaction.user.send(embed=remind_embed)
+            except Exception:
+                pass
+
+        asyncio.create_task(_send_reminder())
+
+    # ── /userinfo ─────────────────────────────────────────────────────────────
+    @discord.app_commands.command(name="userinfo", description="Show detailed info about a user")
+    @discord.app_commands.describe(user="User to inspect (defaults to yourself)")
+    async def userinfo(self, interaction: discord.Interaction, user: discord.Member = None):
+        if await blocked(interaction): return
+        member = user or interaction.user
+        created_days = (datetime.now(timezone.utc) - member.created_at).days
+        joined_days = (datetime.now(timezone.utc) - member.joined_at).days if member.joined_at else 0
+        roles = [r.mention for r in reversed(member.roles) if r.name != "@everyone"]
+        roles_str = " ".join(roles[:10]) + (f" +{len(roles)-10} more" if len(roles) > 10 else "") if roles else "None"
+        embed = discord.Embed(color=member.color if member.color.value else 0x5865F2)
+        embed.set_author(name=str(member), icon_url=member.display_avatar.url)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="ID", value=str(member.id), inline=True)
+        embed.add_field(name="Nickname", value=member.display_name, inline=True)
+        embed.add_field(name="Bot", value="Yes" if member.bot else "No", inline=True)
+        embed.add_field(name="Account Created", value=f"<t:{int(member.created_at.timestamp())}:D>\n{created_days:,} days ago", inline=True)
+        embed.add_field(name="Joined Server", value=f"<t:{int(member.joined_at.timestamp())}:D>\n{joined_days:,} days ago" if member.joined_at else "Unknown", inline=True)
+        embed.add_field(name=f"Roles [{len(roles)}]", value=roles_str, inline=False)
+        embed.set_footer(text=f"Requested by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
+
+    # ── /serverinfo ───────────────────────────────────────────────────────────
+    @discord.app_commands.command(name="serverinfo", description="Show server stats and info")
+    async def serverinfo(self, interaction: discord.Interaction):
+        if await blocked(interaction): return
+        g = interaction.guild
+        bots = sum(1 for m in g.members if m.bot)
+        humans = g.member_count - bots
+        created_days = (datetime.now(timezone.utc) - g.created_at).days
+        embed = discord.Embed(title=g.name, color=0x5865F2)
+        if g.icon:
+            embed.set_thumbnail(url=g.icon.url)
+        if g.banner:
+            embed.set_image(url=g.banner.url)
+        embed.add_field(name="Owner", value=f"<@{g.owner_id}>", inline=True)
+        embed.add_field(name="ID", value=str(g.id), inline=True)
+        embed.add_field(name="Created", value=f"<t:{int(g.created_at.timestamp())}:D>\n{created_days:,} days ago", inline=True)
+        embed.add_field(name="Members", value=f"{humans:,} humans\n{bots:,} bots", inline=True)
+        embed.add_field(name="Channels", value=f"{len(g.text_channels)} text\n{len(g.voice_channels)} voice", inline=True)
+        embed.add_field(name="Boosts", value=f"Level {g.premium_tier}  ·  {g.premium_subscription_count} boosts", inline=True)
+        embed.add_field(name="Roles", value=str(len(g.roles)), inline=True)
+        embed.add_field(name="Emojis", value=str(len(g.emojis)), inline=True)
+        embed.add_field(name="Verification", value=str(g.verification_level).capitalize(), inline=True)
+        embed.set_footer(text=f"Requested by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
+
+    # ── /avatar ───────────────────────────────────────────────────────────────
+    @discord.app_commands.command(name="avatar", description="Show a user's avatar in full size")
+    @discord.app_commands.describe(user="User whose avatar to show")
+    async def avatar(self, interaction: discord.Interaction, user: discord.Member = None):
+        if await blocked(interaction): return
+        member = user or interaction.user
+        av = member.display_avatar.with_size(1024)
+        embed = discord.Embed(color=0x2b2d31)
+        embed.set_author(name=member.display_name, icon_url=av.url)
+        embed.set_image(url=av.url)
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="Open in browser", url=str(av.url), style=discord.ButtonStyle.link))
+        await interaction.response.send_message(embed=embed, view=view)
+
+    # ── /roast & /compliment ──────────────────────────────────────────────────
+    @discord.app_commands.command(name="roast", description="Get the AI to roast someone (all in good fun)")
+    @discord.app_commands.describe(user="Who to roast")
+    async def roast(self, interaction: discord.Interaction, user: discord.Member):
+        if await blocked(interaction): return
+        await interaction.response.defer()
+        try:
+            resp = await ai_client.chat.completions.create(
+                model="llama-3.1-8b-instant", max_tokens=150,
+                messages=[
+                    {"role": "system", "content": "You are a comedic roast bot. Write one short, clever, witty roast (2-3 sentences max). Keep it funny and PG-13 — no slurs, no genuinely hurtful content."},
+                    {"role": "user", "content": f"Roast a Discord user named {user.display_name}."},
+                ]
+            )
+            roast_text = resp.choices[0].message.content.strip()
+        except Exception:
+            roast_text = f"{user.display_name}'s code doesn't even compile."
+        embed = discord.Embed(description=roast_text, color=0xED4245)
+        embed.set_author(name=f"🔥  Roasting {user.display_name}", icon_url=user.display_avatar.url)
+        embed.set_footer(text=f"Requested by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+        await interaction.followup.send(embed=embed)
+
+    @discord.app_commands.command(name="compliment", description="Send someone a genuine compliment")
+    @discord.app_commands.describe(user="Who to compliment")
+    async def compliment(self, interaction: discord.Interaction, user: discord.Member):
+        if await blocked(interaction): return
+        await interaction.response.defer()
+        try:
+            resp = await ai_client.chat.completions.create(
+                model="llama-3.1-8b-instant", max_tokens=120,
+                messages=[
+                    {"role": "system", "content": "You write short, genuine, heartfelt compliments (2-3 sentences). Be warm and creative."},
+                    {"role": "user", "content": f"Write a compliment for a Discord user named {user.display_name}."},
+                ]
+            )
+            text = resp.choices[0].message.content.strip()
+        except Exception:
+            text = f"{user.display_name} brings so much positive energy — the server is genuinely better with them in it."
+        embed = discord.Embed(description=text, color=0x57F287)
+        embed.set_author(name=f"💚  Complimenting {user.display_name}", icon_url=user.display_avatar.url)
+        embed.set_footer(text=f"Requested by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+        await interaction.followup.send(embed=embed)

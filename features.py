@@ -219,11 +219,32 @@ class Features(commands.Cog):
         self.bot = bot
         self.level_task.start()
         self.giveaway_task.start()
+        self.birthday_task.start()
 
+        # birthdays: { guild_id: { user_id: "MM-DD" } }
+        self._birthday_file = os.path.join(os.path.dirname(__file__), "birthdays.json")
+        self._birthdays: dict[str, dict[str, str]] = self._load_birthdays()
+
+    def _load_birthdays(self) -> dict:
+        if os.path.exists(self._birthday_file):
+            try:
+                with open(self._birthday_file, "r") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_birthdays(self):
+        try:
+            with open(self._birthday_file, "w") as f:
+                json.dump(self._birthdays, f, indent=2)
+        except Exception:
+            pass
 
     def cog_unload(self):
         self.level_task.cancel()
         self.giveaway_task.cancel()
+        self.birthday_task.cancel()
 
     @tasks.loop(minutes=1)
     async def giveaway_task(self):
@@ -255,7 +276,7 @@ class Features(commands.Cog):
                     giveaway["ended"] = True
                     giveaway["winner_ids"] = giveaway.get("participants", [])
                     # Mongo disabled: keep giveaways in-memory + local file only.
-                    _save_state()
+                    save_state()
 
 
     @giveaway_task.before_loop
@@ -269,6 +290,79 @@ class Features(commands.Cog):
     @level_task.before_loop
     async def before_level_task(self):
         await self.bot.wait_until_ready()
+
+    @tasks.loop(hours=1)
+    async def birthday_task(self):
+        now = datetime.now(timezone.utc)
+        today = now.strftime("%m-%d")
+        for guild_id_str, users in self._birthdays.items():
+            guild = self.bot.get_guild(int(guild_id_str))
+            if not guild:
+                continue
+            settings = get_guild_settings(int(guild_id_str))
+            ch_id = settings.get("welcome_channel_id") or settings.get("log_channel_id")
+            if not ch_id:
+                continue
+            channel = guild.get_channel(int(ch_id))
+            if not channel:
+                continue
+            for user_id_str, bday in users.items():
+                if bday == today:
+                    member = guild.get_member(int(user_id_str))
+                    if not member:
+                        continue
+                    embed = discord.Embed(
+                        title="🎂  Happy Birthday!",
+                        description=f"Wishing {member.mention} a wonderful birthday! 🎉",
+                        color=0xFEE75C,
+                    )
+                    embed.set_thumbnail(url=member.display_avatar.url)
+                    embed.set_footer(text=guild.name, icon_url=guild.icon.url if guild.icon else discord.Embed.Empty)
+                    try:
+                        await channel.send(embed=embed)
+                    except Exception:
+                        pass
+
+    @birthday_task.before_loop
+    async def before_birthday_task(self):
+        await self.bot.wait_until_ready()
+
+    @discord.app_commands.command(name="birthday", description="Set or view birthdays")
+    @discord.app_commands.describe(action="set or list", date="Your birthday in MM-DD format (e.g. 07-04)", user="User to look up (for list)")
+    @discord.app_commands.choices(action=[
+        discord.app_commands.Choice(name="set", value="set"),
+        discord.app_commands.Choice(name="list", value="list"),
+    ])
+    async def birthday(self, interaction: discord.Interaction, action: str, date: str = None, user: discord.Member = None):
+        if await blocked(interaction): return
+        guild_id = str(interaction.guild.id)
+        self._birthdays.setdefault(guild_id, {})
+
+        if action == "set":
+            if not date:
+                await interaction.response.send_message("❌ Provide a date in MM-DD format.", ephemeral=True)
+                return
+            if not re.fullmatch(r"\d{2}-\d{2}", date):
+                await interaction.response.send_message("❌ Format must be MM-DD, e.g. `07-04`.", ephemeral=True)
+                return
+            self._birthdays[guild_id][str(interaction.user.id)] = date
+            self._save_birthdays()
+            embed = discord.Embed(description=f"🎂  Birthday set to **{date}**.", color=0xFEE75C)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        elif action == "list":
+            entries = self._birthdays.get(guild_id, {})
+            if not entries:
+                await interaction.response.send_message("No birthdays registered yet.", ephemeral=True)
+                return
+            lines = []
+            for uid, bday in sorted(entries.items(), key=lambda x: x[1]):
+                m = interaction.guild.get_member(int(uid))
+                name = m.display_name if m else f"<@{uid}>"
+                lines.append(f"**{name}** — {bday}")
+            embed = discord.Embed(title="🎂  Server Birthdays", description="\n".join(lines), color=0xFEE75C)
+            embed.set_footer(text=f"{len(lines)} registered")
+            await interaction.response.send_message(embed=embed)
 
     async def _send_log(self, guild_id, title, description, color=0x5865F2):
         # Ensure cache is populated from Mongo (if enabled) before reading log_channel_id
@@ -313,15 +407,31 @@ class Features(commands.Cog):
         channel = member.guild.get_channel(int(channel_id))
         if not channel:
             return
-        message = settings.get("welcome_message", "Welcome {mention} to {server}!").format(
-            mention=member.mention,
-            user=member.name,
-            server=member.guild.name,
-            member_count=member.guild.member_count,
-            user_name=member.display_name,
+
+        # Build a rich welcome embed
+        custom_msg = settings.get("welcome_message", "")
+        if custom_msg:
+            desc = custom_msg.format(
+                mention=member.mention,
+                user=member.name,
+                server=member.guild.name,
+                member_count=member.guild.member_count,
+                user_name=member.display_name,
+            )
+        else:
+            desc = f"Hey {member.mention}, welcome to **{member.guild.name}**! 👋\nYou're member **#{member.guild.member_count:,}**."
+
+        embed = discord.Embed(description=desc, color=0x57F287)
+        embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        if member.guild.banner:
+            embed.set_image(url=member.guild.banner.url)
+        embed.set_footer(
+            text=f"{member.guild.name}  ·  {member.guild.member_count:,} members",
+            icon_url=member.guild.icon.url if member.guild.icon else discord.Embed.Empty,
         )
         try:
-            await channel.send(message)
+            await channel.send(embed=embed)
         except Exception:
             pass
         await self._send_log(member.guild.id, "👋 Member Joined", f"{member.mention} joined the server.", 0x57F287)
