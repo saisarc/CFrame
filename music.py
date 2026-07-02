@@ -165,24 +165,13 @@ class SourceSelectionView(discord.ui.View):
                 track_id = tracks[0]["id"]
                 
                 # Download and play
-                result = await self.cog.download_deezer_track(str(track_id))
-                
-                if not result:
-                    arl_set = bool(os.getenv("DEEZER_ARL_TOKEN", "").strip())
-                    if not arl_set:
-                        msg = "❌ `DEEZER_ARL_TOKEN` is not set. Add it to your environment variables."
-                    else:
-                        msg = "❌ Could not download the Deezer track. The ARL token may be expired, or deemix is not installed."
-                    await self.cog.send_interaction(interaction, content=msg, ephemeral=True)
-                    return
-
-                file_path, title, artist = result
+                file_path, title, artist = await self.cog.download_deezer_track(str(track_id))
                 await self.cog.play_local_file(interaction, file_path, title, artist)
 
             except Exception as e:
                 await self.cog.send_interaction(
                     interaction,
-                    content=f"❌ Deezer playback error: `{e}`",
+                    content=f"❌ Deezer error: `{e}`",
                     ephemeral=True,
                 )
             return
@@ -283,44 +272,39 @@ class Music(commands.Cog):
         except Exception:
             pass
 
-    async def download_deezer_track(self, query: str) -> tuple[str, str, str] | None:
+    async def download_deezer_track(self, query: str) -> tuple[str, str, str]:
         """
         Download a Deezer track using Deemix.
         query can be a Deezer URL or a numeric track ID string.
-        Returns: (file_path, track_title, artist_name) or None on failure.
+        Raises RuntimeError with a descriptive message on any failure.
+        Returns: (file_path, track_title, artist_name)
         """
         if not DEEMIX_AVAILABLE:
-            print("Deemix is not installed. Run: pip install deemix")
-            return None
+            raise RuntimeError("deemix is not installed on this server. Check Railway build logs.")
 
         arl_token = os.getenv("DEEZER_ARL_TOKEN", "").strip()
         if not arl_token:
-            print("DEEZER_ARL_TOKEN environment variable is not set.")
-            return None
+            raise RuntimeError("`DEEZER_ARL_TOKEN` is not set in environment variables.")
 
         cache_dir = get_deezer_cache_dir()
 
         # Build a proper deezer.com URL for generateDownloadObject
         if query.startswith(("http://", "https://")):
-            deezer_url = query.split("?")[0]  # strip query params
+            deezer_url = query.split("?")[0]
         else:
-            # Numeric track ID from search results
             deezer_url = f"https://www.deezer.com/track/{query}"
 
         def _do_download():
             dz = DeezerClient()
             if not dz.login_via_arl(arl_token):
-                print("Deemix: ARL login failed — token may be expired.")
-                return None
+                raise RuntimeError("ARL login failed — your token may be expired. Get a new one from deezer.com cookies.")
 
-            # Snapshot files before download to detect new file
             before = (
                 set(cache_dir.rglob("*.mp3"))
                 | set(cache_dir.rglob("*.flac"))
                 | set(cache_dir.rglob("*.m4a"))
             )
 
-            # Fetch track metadata for title/artist
             title = "Unknown"
             artist = "Unknown Artist"
             try:
@@ -331,7 +315,6 @@ class Music(commands.Cog):
             except Exception:
                 pass
 
-            # Load default settings and override location
             settings = loadDeemixSettings()
             settings["downloadLocation"] = str(cache_dir)
             settings["createArtistFolder"] = False
@@ -341,17 +324,15 @@ class Music(commands.Cog):
             try:
                 dl_obj = generateDownloadObject(dz, deezer_url, TrackFormats.MP3_128)
             except DeemixGenerationError as e:
-                print(f"Deemix GenerationError: {e}")
-                return None
+                raise RuntimeError(f"Deezer track could not be resolved: {e}")
 
             if isinstance(dl_obj, list):
                 if not dl_obj:
-                    return None
+                    raise RuntimeError("Deezer returned no downloadable object for that track.")
                 dl_obj = dl_obj[0]
 
             DeemixDownloader(dz, dl_obj, settings).start()
 
-            # Find the newly created file
             after = (
                 set(cache_dir.rglob("*.mp3"))
                 | set(cache_dir.rglob("*.flac"))
@@ -359,15 +340,16 @@ class Music(commands.Cog):
             )
             new_files = after - before
             if not new_files:
-                return None
+                raise RuntimeError("Download ran but no audio file appeared in cache. The track may not be available in your region or requires a Premium account.")
 
             return (str(list(new_files)[0]), title, artist)
 
         try:
             return await asyncio.to_thread(_do_download)
+        except RuntimeError:
+            raise
         except Exception as e:
-            print(f"Deezer download error: {e}")
-            return None
+            raise RuntimeError(f"Unexpected download error: {e}")
 
     async def play_local_file(self, interaction: discord.Interaction, file_path: str, title: str, artist: str):
         """
@@ -797,16 +779,8 @@ class Music(commands.Cog):
             # === DEEZER PATH: Download via Deemix + play via FFmpeg ===
             try:
                 # Download the track
-                result = await self.download_deezer_track(query)
-
-                if not result:
-                    arl_set = bool(os.getenv("DEEZER_ARL_TOKEN", "").strip())
-                    if not arl_set:
-                        msg = "❌ `DEEZER_ARL_TOKEN` is not set. Add it to your environment variables."
-                    else:
-                        msg = "❌ Could not download Deezer track. The ARL token may be expired, or deemix is not installed."
-                    await self.send_interaction(interaction, content=msg, ephemeral=True)
-                    return
+                file_path, title, artist = await self.download_deezer_track(query)
+                await self.play_local_file(interaction, file_path, title, artist)
 
                 file_path, title, artist = result
 
