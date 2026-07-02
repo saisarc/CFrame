@@ -323,7 +323,7 @@ class Music(commands.Cog):
                     # Check if nothing is playing
                     is_playing = False
                     try:
-                        is_playing = player.is_playing() or player.is_paused()
+                        is_playing = player.playing or player.paused
                     except Exception:
                         pass
                     
@@ -830,7 +830,7 @@ class Music(commands.Cog):
                 # Auto-play next queued track from Wavelink queue if nothing is playing
                 for guild_id, player in list(self.active_players.items()):
                     try:
-                        if player and player.connected and not player.is_playing():
+                        if player and player.connected and not player.playing:
                             # Check if player has queued tracks
                             if player.queue and len(player.queue) > 0:
                                 next_track = player.queue.get()
@@ -849,21 +849,9 @@ class Music(commands.Cog):
                     if not isinstance(player, wavelink.Player):
                         continue
 
-                    is_playing = getattr(player, "is_playing", None)
-                    if callable(is_playing):
-                        try:
-                            if player.is_playing():
-                                continue
-                        except Exception:
-                            pass
-
-                    is_paused = getattr(player, "is_paused", None)
-                    if callable(is_paused):
-                        try:
-                            if player.is_paused():
-                                continue
-                        except Exception:
-                            pass
+                    # Skip if currently playing or paused
+                    if player.playing or player.paused:
+                        continue
 
                     if not q:
                         continue
@@ -993,23 +981,9 @@ class Music(commands.Cog):
         guild_id = interaction.guild.id
         q = self.get_queue(guild_id)
 
-        is_playing_fn = getattr(player, "is_playing", None)
-        is_paused_fn = getattr(player, "is_paused", None)
-
-        should_play_now = True
-        if callable(is_playing_fn):
-            try:
-                should_play_now = not bool(is_playing_fn())
-            except Exception:
-                should_play_now = True
-        else:
-            paused = False
-            if callable(is_paused_fn):
-                try:
-                    paused = bool(is_paused_fn())
-                except Exception:
-                    paused = False
-            should_play_now = not bool(q) and not paused
+        # Determine if we should play immediately or queue
+        # Play now if nothing is currently playing or paused
+        should_play_now = not (player.playing or player.paused)
 
         item = {
             "track": track,
@@ -1220,9 +1194,11 @@ class Music(commands.Cog):
 
         if await blocked(interaction):
             return
-        player = interaction.guild.voice_client
-        is_playing_fn = getattr(player, "is_playing", None) if player else None
-        if not player or not callable(is_playing_fn) or not is_playing_fn():
+        
+        guild_id = interaction.guild_id
+        player = self.active_players.get(guild_id)
+        
+        if not player or not player.playing:
             await interaction.response.send_message("❌ Nothing is currently playing.", ephemeral=True)
             return
         try:
@@ -1241,8 +1217,11 @@ class Music(commands.Cog):
     async def pause(self, interaction: discord.Interaction):
         if await blocked(interaction):
             return
-        player = interaction.guild.voice_client
-        if not player or not player.is_playing():
+        
+        guild_id = interaction.guild_id
+        player = self.active_players.get(guild_id)
+        
+        if not player or not player.playing:
             await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
             return
         await player.pause()
@@ -1253,8 +1232,11 @@ class Music(commands.Cog):
     async def resume(self, interaction: discord.Interaction):
         if await blocked(interaction):
             return
-        player = interaction.guild.voice_client
-        if not player or not player.is_paused():
+        
+        guild_id = interaction.guild_id
+        player = self.active_players.get(guild_id)
+        
+        if not player or not player.paused:
             await interaction.response.send_message("❌ The player is not paused.", ephemeral=True)
             return
         await player.resume()
@@ -1282,7 +1264,7 @@ class Music(commands.Cog):
 
         # if currently playing, update immediately
         try:
-            if voice_client.is_playing():
+            if voice_client.playing:
                 title = getattr(getattr(voice_client, "track", None), "title", None) or "Unknown"
                 await self._update_voice_status(voice_client, title)
         except Exception:
