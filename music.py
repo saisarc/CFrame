@@ -538,42 +538,52 @@ class Music(commands.Cog):
                     raise RuntimeError("No Lavalink node available")
                 
                 # Use Lavalink's REST endpoint to load tracks
-                # This is the proper way to load tracks from arbitrary URLs
+                # Lavalink v4 uses GET /v4/loadtracks with query parameters
                 async with aiohttp.ClientSession() as session:
                     headers = {"Authorization": node.password}
-                    url = f"{node.uri.replace('ws://', 'http://').replace('wss://', 'https://')}/v4/loadtracks"
+                    base_url = node.uri.replace('ws://', 'http://').replace('wss://', 'https://')
+                    url = f"{base_url}/v4/loadtracks"
                     
-                    # Try loading as plain URL
-                    async with session.post(url, headers=headers, json={"identifier": cdn_url}) as resp:
+                    print(f"[CDN] Calling Lavalink: GET {url}?identifier={cdn_url[:80]}...")
+                    
+                    # Use GET with query parameters for Lavalink v4
+                    async with session.get(url, headers=headers, params={"identifier": cdn_url}) as resp:
+                        print(f"[CDN] Lavalink response status: {resp.status}")
+                        
                         if resp.status == 200:
                             data = await resp.json()
-                            print(f"[CDN] Lavalink response: {data}")
+                            print(f"[CDN] Response loadType: {data.get('loadType')}, items: {len(data.get('data', []))}")
                             
                             if data.get("loadType") == "track" and data.get("data"):
                                 track_data = data["data"][0] if isinstance(data["data"], list) else data["data"]
-                                print(f"[CDN] ✓ Track loaded: {track_data}")
+                                print(f"[CDN] ✓ Track loaded from Lavalink")
                                 
                                 # Create playable from Lavalink response
                                 track = wavelink.Playable(track_data)
                                 break
                             elif data.get("loadType") == "search" and data.get("data"):
                                 track_data = data["data"][0]
-                                print(f"[CDN] ✓ Search result found: {track_data}")
+                                print(f"[CDN] ✓ Search result found on Lavalink")
                                 track = wavelink.Playable(track_data)
                                 break
+                            else:
+                                print(f"[CDN] Unexpected loadType: {data.get('loadType')}")
                         else:
-                            print(f"[CDN] Lavalink response status: {resp.status}")
+                            resp_text = await resp.text()
+                            print(f"[CDN] Lavalink error response: {resp_text[:200]}")
                 
                 if not track and attempt < 3:
-                    print(f"[CDN] No track found, waiting 2 seconds...")
+                    print(f"[CDN] No track found, waiting 2 seconds before retry...")
                     await asyncio.sleep(2)
             except Exception as e:
-                print(f"[CDN] ✗ Attempt {attempt} failed: {e}")
+                print(f"[CDN] ✗ Attempt {attempt} failed: {type(e).__name__}: {e}")
+                import traceback
+                print(traceback.format_exc())
                 if attempt < 3:
                     await asyncio.sleep(2)
 
         if not track:
-            raise RuntimeError("Lavalink could not load track from Discord CDN")
+            raise RuntimeError("Lavalink could not load track from Discord CDN after 3 attempts")
 
         guild_id = interaction.guild.id
 
