@@ -126,6 +126,19 @@ async def search_deezer_tracks(query: str) -> list[dict] | None:
         return None
 
 
+class _DeemixListener:
+    """Minimal deemix listener that logs events and captures the saved file path."""
+    def __init__(self):
+        self.saved_path: str | None = None
+
+    def send(self, key, value=None):
+        print(f"[Deemix] {key}: {value!r}")
+        if isinstance(value, dict):
+            for k in ("path", "filename", "file"):
+                if value.get(k):
+                    self.saved_path = str(value[k])
+
+
 def make_embed(title: str, description: str, color: int = 0x2b2d31, thumbnail: str = None) -> discord.Embed:
     """Creates a sleek, modern Discord embed matching the native dark theme."""
     embed = discord.Embed(title=title, description=description, color=color)
@@ -166,7 +179,7 @@ class SourceSelectionView(discord.ui.View):
                 
                 # Download and play
                 file_path, title, artist = await self.cog.download_deezer_track(str(track_id))
-                await self.cog.play_local_file(interaction, file_path, title, artist)
+                await self.cog.play_via_lavalink_from_file(interaction, file_path, title, artist)
 
             except Exception as e:
                 await self.cog.send_interaction(
@@ -288,18 +301,18 @@ class Music(commands.Cog):
 
         cache_dir = get_deezer_cache_dir()
 
-        # Build a proper deezer.com URL for generateDownloadObject
         if query.startswith(("http://", "https://")):
             deezer_url = query.split("?")[0]
         else:
             deezer_url = f"https://www.deezer.com/track/{query}"
 
         def _do_download():
+            import time
+            start_ts = time.time()
+
             dz = DeezerClient()
             if not dz.login_via_arl(arl_token):
                 raise RuntimeError("ARL login failed — your token may be expired. Get a new one from deezer.com cookies.")
-
-            before = set(f for f in cache_dir.rglob("*") if f.is_file())
 
             title = "Unknown"
             artist = "Unknown Artist"
@@ -316,6 +329,7 @@ class Music(commands.Cog):
             settings["createArtistFolder"] = False
             settings["createAlbumFolder"] = False
             settings["maxBitrate"] = str(TrackFormats.MP3_128)
+            print(f"[Deemix] Downloading to: {settings['downloadLocation']}")
 
             try:
                 dl_obj = generateDownloadObject(dz, deezer_url, TrackFormats.MP3_128)
@@ -327,14 +341,46 @@ class Music(commands.Cog):
                     raise RuntimeError("Deezer returned no downloadable object for that track.")
                 dl_obj = dl_obj[0]
 
-            DeemixDownloader(dz, dl_obj, settings).start()
+            listener = _DeemixListener()
+            DeemixDownloader(dz, dl_obj, settings, listener).start()
 
-            after = set(f for f in cache_dir.rglob("*") if f.is_file())
-            new_files = after - before
+            # Use modification time to detect new files — catches any download location
+            def _new_files_in(path: Path):
+                result = set()
+                try:
+                    for f in path.rglob("*"):
+                        if f.is_file() and f.stat().st_mtime >= start_ts:
+                            result.add(f)
+                except Exception:
+                    pass
+                return result
+
+            new_files = _new_files_in(cache_dir)
+
+            # Fallback: check deemix default locations in case settings override didn't stick
+            if not new_files:
+                for fallback in [
+                    Path.home() / "Deemix",
+                    Path.home() / "Music",
+                    Path("/root/Deemix"),
+                    Path("/tmp"),
+                ]:
+                    if fallback.exists():
+                        new_files = _new_files_in(fallback)
+                        if new_files:
+                            print(f"[Deemix] Found file in fallback dir: {fallback}")
+                            break
+
+            # Fallback: use path captured by listener
+            if not new_files and listener.saved_path:
+                p = Path(listener.saved_path)
+                if p.exists():
+                    new_files.add(p)
+
             if not new_files:
                 raise RuntimeError(
-                    f"Download ran but no file appeared in `{cache_dir}`. "
-                    "The track may be unavailable in your region, or check that your account has stream access."
+                    f"Download ran but no file appeared in `{cache_dir}` or fallback dirs. "
+                    "Check Railway logs for [Deemix] events to diagnose."
                 )
 
             return (str(list(new_files)[0]), title, artist)
@@ -346,75 +392,79 @@ class Music(commands.Cog):
         except Exception as e:
             raise RuntimeError(f"Unexpected download error: {e}")
 
-    async def play_local_file(self, interaction: discord.Interaction, file_path: str, title: str, artist: str):
+    async def play_via_lavalink_from_file(self, interaction: discord.Interaction, file_path: str, title: str, artist: str):
         """
-        Play a local audio file via FFmpeg in the user's voice channel.
-        This bypasses Lavalink and uses discord.py's native voice client.
+        Upload a local audio file to Discord CDN then play via Lavalink.
+        Avoids discord.py native voice UDP (blocked on Railway).
         """
+        # Upload file to Discord to get a streamable CDN URL
         try:
-            # Ensure user is in voice
-            if not interaction.user.voice or not interaction.user.voice.channel:
-                await self.send_interaction(
-                    interaction,
-                    content="❌ You must join a voice channel first.",
-                    ephemeral=True,
-                )
-                return
-
-            channel = interaction.user.voice.channel
-            guild = interaction.guild
-
-            # Clean up any existing Lavalink player
-            await self.cleanup_ffmpeg_player(guild.id)
-
-            # Connect or move to the user's channel
-            voice_client = guild.voice_client
-            if not voice_client:
-                voice_client = await channel.connect()
-            else:
-                if voice_client.channel != channel:
-                    await voice_client.move_to(channel)
-
-            # Create FFmpeg audio source
+            f = discord.File(file_path, filename=Path(file_path).name)
+            upload_msg = await interaction.channel.send(file=f)
+            cdn_url = upload_msg.attachments[0].url
             try:
-                audio_source = discord.FFmpegPCMAudio(file_path)
-            except Exception as e:
-                await self.send_interaction(
-                    interaction,
-                    content=f"❌ FFmpeg error: Could not load audio file. `{e}`",
-                    ephemeral=True,
-                )
-                return
-
-            # Play the audio
-            def after_playback(error):
-                if error:
-                    print(f"FFmpeg playback error: {error}")
-
-            if not voice_client.is_playing():
-                voice_client.play(audio_source, after=after_playback)
-
-            # Send response embed
-            embed = discord.Embed(
-                title="🎧 Now playing",
-                description=f"**{title}**",
-                color=0x2b2d31,
-            )
-            embed.add_field(name="Channel / Artist", value=f"`{artist}`", inline=True)
-            embed.set_footer(
-                text=f"Requested by {interaction.user.display_name} • Via Deemix",
-                icon_url=interaction.user.display_avatar.url,
-            )
-
-            await self.send_interaction(interaction, embed=embed)
-            await send_log(self.bot, "COMMAND", f"Now playing (Deemix): `{title}` by {artist}")
-
+                await upload_msg.delete()
+            except Exception:
+                pass
         except Exception as e:
-            await self.send_interaction(
-                interaction,
-                content=f"❌ Could not play local file: `{e}`",
-                ephemeral=True,
-            )
+            raise RuntimeError(f"Could not upload file to Discord CDN: {e}")
+
+        # Ensure Lavalink and voice
+        await self.ensure_lavalink(interaction)
+        try:
+            player = await self.ensure_voice(interaction)
+        except RuntimeError:
+            raise
+
+        # Fetch and play via Lavalink
+        results = await wavelink.Pool.fetch_tracks(cdn_url)
+        track = None
+        if isinstance(results, list):
+            track = results[0] if results else None
+        else:
+            track = results.tracks[0] if getattr(results, "tracks", None) else None
+
+        if not track:
+            raise RuntimeError("Lavalink could not load the audio from Discord CDN.")
+
+        guild_id = interaction.guild.id
+        q = self.get_queue(guild_id)
+
+        is_playing = False
+        try:
+            is_playing_fn = getattr(player, "is_playing", None)
+            if callable(is_playing_fn):
+                is_playing = bool(is_playing_fn())
+        except Exception:
+            pass
+
+        if not is_playing and not q:
+            await player.play(track)
+            status = "Now playing"
+        else:
+            q.append({
+                "track": track,
+                "title": title,
+                "uri": cdn_url,
+                "requester_id": interaction.user.id,
+                "requester_name": interaction.user.display_name,
+            })
+            status = "Added to queue"
+
+        embed = discord.Embed(
+            title="🎧 Now playing" if status != "Added to queue" else "📥 Added to Queue",
+            description=f"**{title}**",
+            color=0x2b2d31,
+        )
+        embed.add_field(name="Channel / Artist", value=f"`{artist}`", inline=True)
+        embed.set_footer(
+            text=f"Requested by {interaction.user.display_name} • Via Deezer",
+            icon_url=interaction.user.display_avatar.url,
+        )
+        await self.send_interaction(interaction, embed=embed)
+        await send_log(self.bot, "COMMAND", f"{status} (Deezer): `{title}` by {artist}")
+
+
 
 
 
@@ -774,7 +824,7 @@ class Music(commands.Cog):
             # === DEEZER PATH: Download via Deemix + play via FFmpeg ===
             try:
                 file_path, title, artist = await self.download_deezer_track(query)
-                await self.play_local_file(interaction, file_path, title, artist)
+                await self.play_via_lavalink_from_file(interaction, file_path, title, artist)
             except Exception as e:
                 await self.send_interaction(
                     interaction,
