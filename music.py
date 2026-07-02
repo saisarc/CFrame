@@ -136,6 +136,13 @@ class _DeemixListener:
     def send(self, key, value=None):
         print(f"[Deemix] {key}: {value!r}")
         if isinstance(value, dict):
+            # Capture downloadPath from updateQueue events (most reliable)
+            if key == "updateQueue" and value.get("downloaded") is True:
+                path = value.get("downloadPath")
+                if path:
+                    self.saved_path = str(path)
+                    print(f"[Deemix] Captured downloadPath: {path}")
+            
             # Direct path keys (some deemix versions include these)
             for k in ("path", "filename", "file"):
                 if value.get(k):
@@ -487,18 +494,29 @@ class Music(commands.Cog):
             if not file_found:
                 print(f"[Deemix] Did not see download event or file, will retry with file detection")
 
+            # Strategy 0: use listener's captured downloadPath directly (most reliable)
+            new_files = set()
+            if listener.saved_path:
+                p = Path(listener.saved_path)
+                if p.exists() and p.stat().st_size > 0:
+                    new_files.add(p)
+                    print(f"[Deemix] Using listener's captured downloadPath: {listener.saved_path}")
+            
             # Strategy 1: time-based detection with a 3s buffer for clock skew
-            def _new_files_in(path: Path):
-                result = set()
-                try:
-                    for f in path.rglob("*"):
-                        if f.is_file() and f.stat().st_mtime >= (start_ts - 3):
-                            result.add(f)
-                except Exception:
-                    pass
-                return result
+            if not new_files:
+                def _new_files_in(path: Path):
+                    result = set()
+                    try:
+                        for f in path.rglob("*"):
+                            # Only include audio files that are >0 bytes
+                            audio_exts = {".mp3", ".flac", ".m4a", ".ogg", ".opus"}
+                            if f.is_file() and f.suffix.lower() in audio_exts and f.stat().st_size > 0 and f.stat().st_mtime >= (start_ts - 3):
+                                result.add(f)
+                    except Exception:
+                        pass
+                    return result
 
-            new_files = _new_files_in(cache_dir)
+                new_files = _new_files_in(cache_dir)
 
             # Strategy 2: check deemix default fallback locations
             if not new_files:
@@ -514,20 +532,15 @@ class Music(commands.Cog):
                             print(f"[Deemix] Found file in fallback dir: {fallback}")
                             break
 
-            # Strategy 3: use listener's captured path directly
-            if not new_files and listener.saved_path:
-                p = Path(listener.saved_path)
-                if p.exists():
-                    new_files.add(p)
-
-            # Strategy 4: match by title/artist in filenames across the cache dir
+            # Strategy 3: match by title/artist in filenames across the cache dir
             if not new_files and listener.completed:
+                audio_exts = {".mp3", ".flac", ".m4a", ".ogg", ".opus"}
                 for track_data in listener.completed:
                     t = track_data.get("title", "").lower()
                     a = track_data.get("artist", "").lower()
                     try:
                         for f in cache_dir.rglob("*"):
-                            if f.is_file():
+                            if f.is_file() and f.suffix.lower() in audio_exts and f.stat().st_size > 0:
                                 name = f.name.lower()
                                 if t and t in name:
                                     new_files.add(f)
@@ -538,12 +551,12 @@ class Music(commands.Cog):
                     except Exception:
                         pass
 
-            # Strategy 5: last resort — most recently modified audio file in cache
+            # Strategy 4: last resort — most recently modified audio file in cache
             if not new_files:
                 audio_exts = {".mp3", ".flac", ".m4a", ".ogg", ".opus"}
                 candidates = [
                     f for f in cache_dir.rglob("*")
-                    if f.is_file() and f.suffix.lower() in audio_exts
+                    if f.is_file() and f.suffix.lower() in audio_exts and f.stat().st_size > 0
                 ]
                 if candidates:
                     newest = max(candidates, key=lambda f: f.stat().st_mtime)
