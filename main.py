@@ -16,9 +16,18 @@ start_time = time.time()
 
 status_list = cycle(['Watching beeping booping', 'Playing in developer mode', 'Playing My creators favorite child'])
 
+# Optimized intents - only request what's needed
 intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+intents.message_content = True   # For prefix commands
+intents.voice_states = True      # For music voice tracking
+# Disabled: members, presences (not needed, saves memory)
+
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+    max_messages=500,  # Reduced from default 1000 to save memory
+    chunk_guilds_at_startup=False  # Don't chunk members on startup
+)
 bot.maintenance = False
 
 @tasks.loop(seconds=10)
@@ -31,6 +40,10 @@ async def on_ready():
     # Start status task and add cogs with per-cog error handling so we can
     # see which cog (if any) causes startup to fail without the whole process exiting.
     change_status.start()
+    
+    # Start resource cleanup task
+    if not cleanup_resources.is_running():
+        cleanup_resources.start()
 
     async def safe_add_cog(cog_ctor, *args):
         name = getattr(cog_ctor, '__name__', str(cog_ctor))
@@ -78,6 +91,28 @@ async def on_disconnect():
 @bot.event
 async def on_resumed():
     await send_log(bot, "RESTART", "🔄 Bot **reconnected** and resumed session.")
+
+@tasks.loop(minutes=30)
+async def cleanup_resources():
+    """Periodic cleanup to keep memory usage low."""
+    try:
+        # Clear old messages from cache if they exist
+        if hasattr(bot, '_messages'):
+            bot._messages.clear()
+        
+        # Cleanup idle voice connections and cache (handle in music cog)
+        music_cog = bot.get_cog("Music")
+        if music_cog:
+            if hasattr(music_cog, 'cleanup_idle_connections'):
+                await music_cog.cleanup_idle_connections()
+            if hasattr(music_cog, 'cleanup_deezer_cache'):
+                await music_cog.cleanup_deezer_cache()
+    except Exception as e:
+        print(f"[Cleanup] Error during resource cleanup: {e}")
+
+@cleanup_resources.before_loop
+async def before_cleanup():
+    await bot.wait_until_ready()
 
 @bot.event
 async def on_error(event, *args, **kwargs):

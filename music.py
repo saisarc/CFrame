@@ -303,6 +303,77 @@ class Music(commands.Cog):
         except Exception:
             pass
 
+    async def cleanup_idle_connections(self):
+        """Disconnect from voice channels that have been idle (no one playing) for 5+ minutes."""
+        try:
+            import time
+            current_time = time.time()
+            
+            for guild_id in list(self.active_players.keys()):
+                try:
+                    guild = self.bot.get_guild(guild_id)
+                    if not guild or not guild.voice_client:
+                        self.active_players.pop(guild_id, None)
+                        continue
+                    
+                    player = guild.voice_client
+                    if not isinstance(player, wavelink.Player):
+                        continue
+                    
+                    # Check if nothing is playing
+                    is_playing = False
+                    try:
+                        is_playing = player.is_playing() or player.is_paused()
+                    except Exception:
+                        pass
+                    
+                    if not is_playing:
+                        # Check if idle for too long (estimate: if queue empty and nothing current)
+                        queue = getattr(player, "queue", None)
+                        current = getattr(player, "current", None)
+                        if not current and (not queue or len(queue) == 0):
+                            print(f"[Cleanup] Disconnecting idle player from guild {guild_id}")
+                            await player.disconnect()
+                            self.active_players.pop(guild_id, None)
+                            self.queues.pop(guild_id, None)
+                except Exception as e:
+                    print(f"[Cleanup] Error checking guild {guild_id}: {e}")
+        except Exception as e:
+            print(f"[Cleanup] Error in cleanup_idle_connections: {e}")
+
+    async def cleanup_deezer_cache(self):
+        """Remove Deezer cache files older than 24 hours to save disk space."""
+        try:
+            import time
+            cache_dir = get_deezer_cache_dir()
+            current_time = time.time()
+            max_age = 86400  # 24 hours in seconds
+            
+            removed_count = 0
+            removed_size = 0
+            
+            for file_path in cache_dir.glob("*.mp3"):
+                try:
+                    file_age = current_time - file_path.stat().st_mtime
+                    if file_age > max_age:
+                        file_size = file_path.stat().st_size
+                        file_path.unlink()
+                        removed_count += 1
+                        removed_size += file_size
+                        
+                        # Also remove from cache dict
+                        track_id = str(file_path.stem).split(" - ")[-1] if " - " in file_path.stem else None
+                        if track_id:
+                            self.deezer_track_cache.pop(track_id, None)
+                except Exception as e:
+                    print(f"[Cleanup] Could not remove {file_path}: {e}")
+            
+            if removed_count > 0:
+                size_mb = removed_size / 1024 / 1024
+                print(f"[Cleanup] Removed {removed_count} old Deezer cache files ({size_mb:.1f}MB)")
+        except Exception as e:
+            print(f"[Cleanup] Error in cleanup_deezer_cache: {e}")
+
     async def download_deezer_track(self, query: str) -> tuple[str, str, str]:
         """
         Download a Deezer track using Deemix.
@@ -521,16 +592,16 @@ class Music(commands.Cog):
         except RuntimeError:
             raise
 
-        # Wait for Discord CDN to be available
+        # Wait for Discord CDN to be available and indexed by Lavalink
         print(f"[CDN] CDN URL: {cdn_url[:100]}...")
-        print(f"[CDN] Waiting 2 seconds for Discord CDN to be indexed...")
-        await asyncio.sleep(2)
+        print(f"[CDN] Waiting 5 seconds for Discord CDN to be indexed...")
+        await asyncio.sleep(5)
 
-        # Try to load track via Lavalink REST API endpoint
+        # Try to load track via Lavalink REST API endpoint with retry logic
         track = None
-        for attempt in range(1, 4):
+        for attempt in range(1, 6):  # Increased to 5 attempts
             try:
-                print(f"[CDN] Attempt {attempt}: Loading track from CDN URL via Lavalink")
+                print(f"[CDN] Attempt {attempt}/5: Loading track from CDN URL via Lavalink")
                 
                 # Get Lavalink node
                 node = wavelink.Pool.get_node()
@@ -544,46 +615,42 @@ class Music(commands.Cog):
                     base_url = node.uri.replace('ws://', 'http://').replace('wss://', 'https://')
                     url = f"{base_url}/v4/loadtracks"
                     
-                    print(f"[CDN] Calling Lavalink: GET {url}?identifier={cdn_url[:80]}...")
-                    
                     # Use GET with query parameters for Lavalink v4
-                    async with session.get(url, headers=headers, params={"identifier": cdn_url}) as resp:
-                        print(f"[CDN] Lavalink response status: {resp.status}")
-                        
+                    async with session.get(url, headers=headers, params={"identifier": cdn_url}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            print(f"[CDN] Response loadType: {data.get('loadType')}, items: {len(data.get('data', []))}")
+                            load_type = data.get('loadType', 'unknown')
+                            data_list = data.get('data')
                             
-                            if data.get("loadType") == "track" and data.get("data"):
-                                track_data = data["data"][0] if isinstance(data["data"], list) else data["data"]
-                                print(f"[CDN] ✓ Track loaded from Lavalink")
-                                
-                                # Create playable from Lavalink response
+                            print(f"[CDN] Response: loadType={load_type}, data_type={type(data_list).__name__}, data_len={len(data_list) if data_list else 0}")
+                            
+                            if load_type == "track" and data_list and len(data_list) > 0:
+                                track_data = data_list[0]
+                                print(f"[CDN] ✓ Track loaded successfully from Lavalink on attempt {attempt}")
                                 track = wavelink.Playable(track_data)
                                 break
-                            elif data.get("loadType") == "search" and data.get("data"):
-                                track_data = data["data"][0]
-                                print(f"[CDN] ✓ Search result found on Lavalink")
+                            elif load_type == "search" and data_list and len(data_list) > 0:
+                                track_data = data_list[0]
+                                print(f"[CDN] ✓ Search result found from Lavalink on attempt {attempt}")
                                 track = wavelink.Playable(track_data)
                                 break
                             else:
-                                print(f"[CDN] Unexpected loadType: {data.get('loadType')}")
+                                print(f"[CDN] No results yet (loadType={load_type}), retrying...")
                         else:
-                            resp_text = await resp.text()
-                            print(f"[CDN] Lavalink error response: {resp_text[:200]}")
+                            print(f"[CDN] HTTP {resp.status}, retrying...")
                 
-                if not track and attempt < 3:
-                    print(f"[CDN] No track found, waiting 2 seconds before retry...")
-                    await asyncio.sleep(2)
+                if not track and attempt < 5:
+                    wait_time = 3 + (attempt * 2)  # Progressively longer waits: 5s, 7s, 9s, 11s
+                    print(f"[CDN] Track not loaded, waiting {wait_time} seconds before attempt {attempt + 1}...")
+                    await asyncio.sleep(wait_time)
             except Exception as e:
-                print(f"[CDN] ✗ Attempt {attempt} failed: {type(e).__name__}: {e}")
-                import traceback
-                print(traceback.format_exc())
-                if attempt < 3:
-                    await asyncio.sleep(2)
+                print(f"[CDN] ✗ Attempt {attempt} error: {type(e).__name__}: {e}")
+                if attempt < 5:
+                    wait_time = 3 + (attempt * 2)
+                    await asyncio.sleep(wait_time)
 
         if not track:
-            raise RuntimeError("Lavalink could not load track from Discord CDN after 3 attempts")
+            raise RuntimeError("Lavalink could not load track from Discord CDN after 5 attempts")
 
         guild_id = interaction.guild.id
 
@@ -594,25 +661,27 @@ class Music(commands.Cog):
         is_playing = current_track is not None
         has_queued = lavalink_queue and len(lavalink_queue) > 0
         
-        if is_playing:
-            print(f"[Deezer] ✓ Currently playing: {getattr(current_track, 'title', 'Unknown')}, will QUEUE")
-            status = "Added to queue"
-        elif has_queued:
-            print(f"[Deezer] ✓ Queue has {len(lavalink_queue)} items, will QUEUE")
-            status = "Added to queue"
+        if is_playing or has_queued:
+            # Something is already playing - ADD TO QUEUE
+            print(f"[Deezer] Currently playing/queued, adding to queue")
+            try:
+                player.queue.put(track)
+                status = "Added to queue"
+            except Exception as e:
+                print(f"[Deezer] Queue.put failed: {e}, falling back to player.play()")
+                await player.play(track)
+                status = "Now playing"
         else:
-            print(f"[Deezer] Nothing playing/queued, will PLAY immediately")
+            # Nothing playing - PLAY IMMEDIATELY
+            print(f"[Deezer] Nothing playing, playing immediately")
+            await player.play(track)
             status = "Now playing"
-        
-        # ALWAYS call player.play() - Lavalink will queue automatically if needed
-        print(f"[Deezer] Calling player.play() - Lavalink will queue if needed")
-        await player.play(track)
         
         # Store metadata for lyrics
         self.deezer_now_playing[guild_id] = (title, artist)
 
         embed = discord.Embed(
-            title="🎧 Now playing" if status != "Added to queue" else "📥 Added to Queue",
+            title="🎧 Now playing" if status == "Now playing" else "📥 Added to Queue",
             description=f"**{title}**",
             color=0x2b2d31,
         )
