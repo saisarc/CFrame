@@ -3,11 +3,17 @@ import os
 from urllib.parse import urlparse
 import collections
 from collections import deque
+from pathlib import Path
 import discord
 from discord.ext import commands
 import wavelink
 import aiohttp
 from commands import blocked, send_log
+
+try:
+    from deemix.app import Deemix
+except ImportError:
+    Deemix = None
 
 
 def normalize_query_for_lavalink(query: str) -> str:
@@ -45,8 +51,73 @@ def source_to_search_prefix(source: str) -> str:
     return mapping.get(source_key, "ytsearch")
 
 
+def preferred_prefix_for_query(query: str) -> str:
+    if not query:
+        return "amsearch"
+    q = query.strip().lower()
+    if q.startswith(("spsearch:", "spotify", "https://open.spotify.com", "spotify:")):
+        return "spsearch"
+    if q.startswith(("amsearch:", "apple music", "music.apple.com", "appl:", "apple:")):
+        return "amsearch"
+    if q.startswith(("ytsearch:", "youtube", "youtu")):
+        return "ytsearch"
+    return "amsearch"
+
+
 def spotify_credentials_configured() -> bool:
     return bool(os.getenv("SPOTIFY_CLIENT_ID", "").strip()) and bool(os.getenv("SPOTIFY_CLIENT_SECRET", "").strip())
+
+
+def is_deezer_query(query: str) -> bool:
+    """Check if a query is a Deezer link or dzsearch prefix."""
+    if not query:
+        return False
+    q = query.strip().lower()
+    if q.startswith("dzsearch:"):
+        return True
+    if q.startswith(("http://", "https://")):
+        if "deezer.com" in q:
+            return True
+    return False
+
+
+def get_deezer_cache_dir() -> Path:
+    """Get or create the Deezer cache directory."""
+    cache_dir = Path(os.getenv("DEEZER_CACHE_DIR", "./deezer_cache"))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+async def search_deezer_tracks(query: str) -> list[dict] | None:
+    """
+    Search Deezer for tracks using the Deezer API (no auth needed for search).
+    Returns list of dicts with {id, title, artist} or None on failure.
+    """
+    if not query or not query.strip():
+        return None
+
+    try:
+        url = "https://api.deezer.com/search/track"
+        params = {"q": query.strip(), "limit": 5}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    results = data.get("data", [])
+                    
+                    tracks = []
+                    for track in results:
+                        tracks.append({
+                            "id": track.get("id"),
+                            "title": track.get("title", "Unknown"),
+                            "artist": track.get("artist", {}).get("name", "Unknown Artist"),
+                        })
+                    return tracks if tracks else None
+        return None
+    except Exception as e:
+        print(f"Deezer search error: {e}")
+        return None
 
 
 def make_embed(title: str, description: str, color: int = 0x2b2d31, thumbnail: str = None) -> discord.Embed:
@@ -71,10 +142,56 @@ class SourceSelectionView(discord.ui.View):
         except Exception:
             pass
 
+        # Special handling for Deezer search
+        if prefix == "deezer":
+            try:
+                tracks = await search_deezer_tracks(self.query)
+                
+                if not tracks:
+                    await self.cog.send_interaction(
+                        interaction,
+                        content="❌ No Deezer tracks found for that query. Try another search or source.",
+                        ephemeral=True,
+                    )
+                    return
+
+                # Use the first result
+                track_id = tracks[0]["id"]
+                
+                # Download and play
+                result = await self.cog.download_deezer_track(str(track_id))
+                
+                if not result:
+                    await self.cog.send_interaction(
+                        interaction,
+                        content="❌ Could not download the Deezer track. Ensure `DEEZER_ARL_TOKEN` is configured.",
+                        ephemeral=True,
+                    )
+                    return
+
+                file_path, title, artist = result
+                await self.cog.play_local_file(interaction, file_path, title, artist)
+
+            except Exception as e:
+                await self.cog.send_interaction(
+                    interaction,
+                    content=f"❌ Deezer playback error: `{e}`",
+                    ephemeral=True,
+                )
+            return
+
         if prefix == "spsearch" and not spotify_credentials_configured():
             await self.cog.send_interaction(
                 interaction,
-                content="⚠️ Spotify search is unavailable on this deployment because Spotify credentials are not configured. Please try YouTube or Apple Music instead.",
+                content="⚠️ Spotify search is unavailable on this deployment because Lavalink is missing Spotify credentials. Please use Apple Music or a direct URL instead.",
+                ephemeral=True,
+            )
+            return
+
+        if prefix == "amsearch":
+            await self.cog.send_interaction(
+                interaction,
+                content="⚠️ Apple Music search is currently unavailable in this deployment because Lavalink's Apple Music provider is failing. Please use a direct URL or another source.",
                 ephemeral=True,
             )
             return
@@ -98,7 +215,7 @@ class SourceSelectionView(discord.ui.View):
             if prefix == "spsearch" and ("forbidden" in message or "403" in message or "something went wrong while looking up the track" in message):
                 await self.cog.send_interaction(
                     interaction,
-                    content="⚠️ Spotify lookup failed. The current Lavalink setup is not authorized for that search. Please try YouTube or Apple Music instead.",
+                    content="⚠️ Spotify lookup failed. Lavalink is missing or rejecting the Spotify credentials. Please use a direct URL or another source.",
                     ephemeral=True,
                 )
             else:
@@ -115,6 +232,10 @@ class SourceSelectionView(discord.ui.View):
     @discord.ui.button(label="Apple Music", style=discord.ButtonStyle.secondary, emoji="🍎")
     async def apple_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_selection(interaction, source_to_search_prefix("apple music"))
+
+    @discord.ui.button(label="Deezer", style=discord.ButtonStyle.blurple, emoji="🔵")
+    async def deezer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_selection(interaction, "deezer")
 
 class Music(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -133,6 +254,170 @@ class Music(commands.Cog):
 
         bot.loop.create_task(self.connect_node())
         bot.loop.create_task(self.queue_worker())
+
+    async def cleanup_ffmpeg_player(self, guild_id: int):
+        """Cleanly disconnect active Lavalink player before switching to FFmpeg."""
+        try:
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                return
+            voice_client = guild.voice_client
+            if not voice_client:
+                return
+            if isinstance(voice_client, wavelink.Player):
+                try:
+                    await voice_client.stop()
+                except Exception:
+                    pass
+                try:
+                    await voice_client.disconnect()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    async def download_deezer_track(self, query: str) -> tuple[str, str, str] | None:
+        """
+        Download a Deezer track using Deemix.
+        Returns: (file_path, track_title, artist_name) or None on failure
+        """
+        if not Deemix:
+            return None
+
+        try:
+            arl_token = os.getenv("DEEZER_ARL_TOKEN", "").strip()
+            if not arl_token:
+                return None
+
+            cache_dir = get_deezer_cache_dir()
+
+            # Extract track ID or URL
+            track_id = None
+            if query.startswith(("http://", "https://")):
+                # Extract ID from URL: deezer.com/track/XXXXX or deezer.com/album/XXXXX
+                if "/track/" in query:
+                    try:
+                        track_id = query.split("/track/")[1].split("?")[0]
+                    except (IndexError, ValueError):
+                        return None
+                elif "/album/" in query:
+                    try:
+                        track_id = query.split("/album/")[1].split("?")[0]
+                    except (IndexError, ValueError):
+                        return None
+            elif query.lower().startswith("dzsearch:"):
+                # For dzsearch, we'd need Deemix search - for now just extract ID if possible
+                remainder = query[9:].strip()
+                try:
+                    track_id = int(remainder)
+                except ValueError:
+                    return None
+            else:
+                try:
+                    track_id = int(query)
+                except ValueError:
+                    return None
+
+            if not track_id:
+                return None
+
+            # Use Deemix to download
+            try:
+                deezer = Deemix(arl_token, str(cache_dir))
+                
+                # Deemix download returns dict with track info
+                result = await asyncio.to_thread(deezer.download_track, track_id)
+                
+                if not result or not isinstance(result, dict):
+                    return None
+
+                file_path = result.get("path")
+                title = result.get("title", "Unknown")
+                artist = result.get("artist", "Unknown Artist")
+
+                if file_path and Path(file_path).exists():
+                    return (str(file_path), title, artist)
+                return None
+
+            except Exception as e:
+                print(f"Deemix download error: {e}")
+                return None
+
+        except Exception as e:
+            print(f"Error in download_deezer_track: {e}")
+            return None
+
+    async def play_local_file(self, interaction: discord.Interaction, file_path: str, title: str, artist: str):
+        """
+        Play a local audio file via FFmpeg in the user's voice channel.
+        This bypasses Lavalink and uses discord.py's native voice client.
+        """
+        try:
+            # Ensure user is in voice
+            if not interaction.user.voice or not interaction.user.voice.channel:
+                await self.send_interaction(
+                    interaction,
+                    content="❌ You must join a voice channel first.",
+                    ephemeral=True,
+                )
+                return
+
+            channel = interaction.user.voice.channel
+            guild = interaction.guild
+
+            # Clean up any existing Lavalink player
+            await self.cleanup_ffmpeg_player(guild.id)
+
+            # Connect or move to the user's channel
+            voice_client = guild.voice_client
+            if not voice_client:
+                voice_client = await channel.connect()
+            else:
+                if voice_client.channel != channel:
+                    await voice_client.move_to(channel)
+
+            # Create FFmpeg audio source
+            try:
+                audio_source = discord.FFmpegPCMAudio(file_path)
+            except Exception as e:
+                await self.send_interaction(
+                    interaction,
+                    content=f"❌ FFmpeg error: Could not load audio file. `{e}`",
+                    ephemeral=True,
+                )
+                return
+
+            # Play the audio
+            def after_playback(error):
+                if error:
+                    print(f"FFmpeg playback error: {error}")
+
+            if not voice_client.is_playing():
+                voice_client.play(audio_source, after=after_playback)
+
+            # Send response embed
+            embed = discord.Embed(
+                title="🎧 Now playing",
+                description=f"**{title}**",
+                color=0x2b2d31,
+            )
+            embed.add_field(name="Channel / Artist", value=f"`{artist}`", inline=True)
+            embed.set_footer(
+                text=f"Requested by {interaction.user.display_name} • Via Deemix",
+                icon_url=interaction.user.display_avatar.url,
+            )
+
+            await self.send_interaction(interaction, embed=embed)
+            await send_log(self.bot, "COMMAND", f"Now playing (Deemix): `{title}` by {artist}")
+
+        except Exception as e:
+            await self.send_interaction(
+                interaction,
+                content=f"❌ Could not play local file: `{e}`",
+                ephemeral=True,
+            )
+
+
 
 
     async def connect_node(self):
@@ -409,18 +694,38 @@ class Music(commands.Cog):
                 await self._update_voice_status(player, title)
                 status_text = "Now playing"
             except Exception as play_error:
-                message = str(play_error).lower()
-                if "requires login" in message or "player configuration error" in message or "all clients failed" in message:
-                    await self.send_interaction(
-                        interaction,
-                        content="⚠️ That YouTube result could not be played. The video may be age-restricted, region-locked, or require login. Please try a different song or source.",
-                    )
+                # Check if the track is actually playing despite the exception
+                is_playing = False
+                try:
+                    is_playing_fn = getattr(player, "is_playing", None)
+                    if callable(is_playing_fn):
+                        is_playing = bool(is_playing_fn())
+                except Exception:
+                    pass
+                
+                # If track is playing, ignore the exception - it's just a warning
+                if is_playing:
+                    title = item["title"]
+                    try:
+                        self._get_voice_channel_and_store_original(interaction.guild, player.channel)
+                    except Exception:
+                        pass
+                    await self._update_voice_status(player, title)
+                    status_text = "Now playing"
                 else:
-                    await self.send_interaction(
-                        interaction,
-                        content="⚠️ That track could not be played by Lavalink. Please try a different query or source.",
-                    )
-                return
+                    # Track is not playing, show the error
+                    message = str(play_error).lower()
+                    if "requires login" in message or "player configuration error" in message or "all clients failed" in message:
+                        await self.send_interaction(
+                            interaction,
+                            content="⚠️ That YouTube result could not be played. The video may be age-restricted, region-locked, or require login. Please try a different song or source.",
+                        )
+                    else:
+                        await self.send_interaction(
+                            interaction,
+                            content="⚠️ That track could not be played by Lavalink. Please try a different query or source.",
+                        )
+                    return
         else:
             q.append(item)
             status_text = "Added to queue"
@@ -454,8 +759,8 @@ class Music(commands.Cog):
 
         await send_log(self.bot, "COMMAND", f"{interaction.user} {status_text.lower()}: `{item[title]}`")
 
-    @discord.app_commands.command(name="play", description="Play a song via Lavalink (adds to queue)")
-    @discord.app_commands.describe(query="Song name or URL (YouTube, Spotify, Apple Music)")
+    @discord.app_commands.command(name="play", description="Play a song via Lavalink (adds to queue) or Deezer via Deemix")
+    @discord.app_commands.describe(query="Song name or URL (YouTube, Spotify, Apple Music, or Deezer)")
     async def play(self, interaction: discord.Interaction, query: str):
         if await blocked(interaction):
             return
@@ -464,7 +769,36 @@ class Music(commands.Cog):
                 await interaction.response.defer()
         except Exception:
             pass
-            
+
+        # Check if this is a Deezer query
+        if is_deezer_query(query):
+            # === DEEZER PATH: Download via Deemix + play via FFmpeg ===
+            try:
+                # Download the track
+                result = await self.download_deezer_track(query)
+                
+                if not result:
+                    await self.send_interaction(
+                        interaction,
+                        content="❌ Could not download Deezer track. Ensure `DEEZER_ARL_TOKEN` is configured and valid.",
+                        ephemeral=True,
+                    )
+                    return
+
+                file_path, title, artist = result
+
+                # Play the local file
+                await self.play_local_file(interaction, file_path, title, artist)
+
+            except Exception as e:
+                await self.send_interaction(
+                    interaction,
+                    content=f"❌ Deezer playback error: `{e}`",
+                    ephemeral=True,
+                )
+            return
+
+        # === LAVALINK PATH: Existing logic for YouTube, Spotify, Apple Music ===
         try:
             await self.ensure_lavalink(interaction)
             player = await self.ensure_voice(interaction)
@@ -488,7 +822,7 @@ class Music(commands.Cog):
                         description=f"Select where to search for **{query}**.",
                         color=0x2b2d31,
                     )
-                    embed.add_field(name="Options", value="YouTube • Spotify • Apple Music", inline=False)
+                    embed.add_field(name="Options", value="YouTube • Spotify • Apple Music • Deezer", inline=False)
                     await self.send_interaction(interaction, embed=embed, ephemeral=True, view=view)
                     return
 

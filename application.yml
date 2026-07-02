@@ -20,10 +20,10 @@ lavalink:
 
 plugins:
   youtube:
-    enabled: true
-    allowSearch: true
-    allowDirectVideoIds: true
-    allowDirectPlaylistIds: true
+    enabled: false
+    allowSearch: false
+    allowDirectVideoIds: false
+    allowDirectPlaylistIds: false
     clients:
       - MUSIC
       - ANDROID_VR
