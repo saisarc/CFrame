@@ -78,7 +78,7 @@ HELP_PAGES = [
             {
                 "name": "/filter",
                 "usage": "/filter <preset>",
-                "desc": "Apply a preset like nightcore, bassboost, or vaporwave.",
+                "desc": "Apply a preset like nightcore, bassboost, vaporwave, robot, or telephone.",
             },
             {
                 "name": "/join",

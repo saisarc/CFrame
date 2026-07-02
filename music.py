@@ -192,6 +192,7 @@ class Music(commands.Cog):
         # config
         self.repeat_modes = {}  # guild_id -> 'off'|'one'|'all'
         self.volumes = {}       # guild_id -> int
+        self.active_filter_presets: dict[int, str] = {}
 
         # Deezer session cache: track_id (str) -> local file path
         # Avoids re-downloading the same track within a session
@@ -634,6 +635,7 @@ class Music(commands.Cog):
         else:
             # Nothing playing - PLAY IMMEDIATELY
             print(f"[Deezer] Nothing playing, playing immediately")
+            await self._apply_stored_filter_preset(guild_id, player)
             await player.play(track)
             status = "Now playing"
         
@@ -731,6 +733,145 @@ class Music(commands.Cog):
     def get_queue(self, guild_id: int):
         return self.queues.setdefault(guild_id, deque())
 
+    def _build_filter_profile(self, preset: str) -> tuple[wavelink.Filters | None, str, str]:
+        preset_val = (preset or "").strip().lower()
+
+        if preset_val in {"reset", "off", "none"}:
+            return None, "🎚️ Filters Reset", "All audio filters have been removed."
+
+        filters = wavelink.Filters()
+
+        if preset_val == "nightcore":
+            filters.timescale.set(speed=1.2, pitch=1.25, rate=1.0)
+            return filters, "🎚️ Nightcore Enabled", "Pitch: `1.25x`, Speed: `1.2x`"
+
+        if preset_val == "slowed":
+            filters.timescale.set(speed=0.85, pitch=0.85, rate=1.0)
+            return filters, "🎚️ Slowed Enabled", "Pitch: `0.85x`, Speed: `0.85x`"
+
+        if preset_val == "vaporwave":
+            filters.timescale.set(speed=0.8, pitch=0.8, rate=1.0)
+            return filters, "🎚️ Vaporwave Enabled", "Pitch: `0.80x`, Speed: `0.80x`"
+
+        if preset_val == "deep":
+            filters.timescale.set(speed=0.9, pitch=0.8, rate=1.0)
+            return filters, "🎚️ Deep Voice Enabled", "Pitch: `0.80x`, Speed: `0.90x`"
+
+        if preset_val == "chipmunk":
+            filters.timescale.set(speed=1.15, pitch=1.35, rate=1.0)
+            return filters, "🎚️ Chipmunk Enabled", "Pitch: `1.35x`, Speed: `1.15x`"
+
+        if preset_val == "bassboost":
+            bands = [
+                {"band": 0, "gain": 0.30},
+                {"band": 1, "gain": 0.25},
+                {"band": 2, "gain": 0.20},
+                {"band": 3, "gain": 0.15},
+            ]
+            filters.equalizer.set(bands=bands)
+            return filters, "🎚️ Bassboost Enabled", "Low frequencies boosted."
+
+        if preset_val == "distortion":
+            filters.distortion.set(
+                sin_scale=0.9,
+                cos_scale=0.9,
+                tan_scale=0.35,
+                offset=0.0,
+                scale=1.0,
+            )
+            return filters, "🎚️ Distortion Enabled", "Added a stronger distorted effect."
+
+        if preset_val == "robot":
+            filters.distortion.set(
+                sin_scale=0.75,
+                cos_scale=0.75,
+                tan_scale=0.25,
+                offset=0.0,
+                scale=1.0,
+            )
+            filters.channel_mix.set(
+                left_to_left=0.70,
+                left_to_right=0.30,
+                right_to_left=0.30,
+                right_to_right=0.70,
+            )
+            return filters, "🎚️ Robot Enabled", "Distortion and channel mixing applied."
+
+        if preset_val == "telephone":
+            filters.equalizer.set(
+                bands=[
+                    {"band": 0, "gain": -0.25},
+                    {"band": 1, "gain": -0.20},
+                    {"band": 2, "gain": -0.10},
+                    {"band": 3, "gain": 0.05},
+                    {"band": 4, "gain": 0.15},
+                    {"band": 5, "gain": 0.20},
+                    {"band": 6, "gain": 0.15},
+                    {"band": 7, "gain": 0.05},
+                    {"band": 8, "gain": -0.05},
+                    {"band": 9, "gain": -0.10},
+                    {"band": 10, "gain": -0.15},
+                    {"band": 11, "gain": -0.20},
+                    {"band": 12, "gain": -0.25},
+                    {"band": 13, "gain": -0.25},
+                    {"band": 14, "gain": -0.25},
+                ]
+            )
+            filters.low_pass.set(smoothing=8.0)
+            return filters, "🎚️ Telephone Enabled", "Narrow-band voice effect applied."
+
+        if preset_val == "mono":
+            filters.channel_mix.set(
+                left_to_left=0.50,
+                left_to_right=0.50,
+                right_to_left=0.50,
+                right_to_right=0.50,
+            )
+            return filters, "🎚️ Mono Enabled", "Both channels are blended together."
+
+        if preset_val == "wide":
+            filters.channel_mix.set(
+                left_to_left=0.85,
+                left_to_right=0.15,
+                right_to_left=0.15,
+                right_to_right=0.85,
+            )
+            return filters, "🎚️ Wide Stereo Enabled", "Stereo crossfeed widened."
+
+        if preset_val == "8d":
+            filters.rotation.set(rotation_hz=0.2)
+            return filters, "🎚️ 8D Audio Enabled", "Sound panning around stereo channels at `0.2 Hz`."
+
+        if preset_val == "karaoke":
+            filters.karaoke.set(level=1.0, mono_level=1.0, filter_band=220.0, filter_width=100.0)
+            return filters, "🎚️ Karaoke Filter Enabled", "Vocal frequency range attenuated."
+
+        if preset_val == "tremolo":
+            filters.tremolo.set(frequency=4.0, depth=0.6)
+            return filters, "🎚️ Tremolo Enabled", "Volume oscillation: `4 Hz`, Depth: `0.6`."
+
+        if preset_val == "vibrato":
+            filters.vibrato.set(frequency=4.0, depth=0.6)
+            return filters, "🎚️ Vibrato Enabled", "Pitch oscillation: `4 Hz`, Depth: `0.6`."
+
+        if preset_val == "lowpass":
+            filters.low_pass.set(smoothing=20.0)
+            return filters, "🎚️ LowPass Enabled", "Higher frequencies suppressed (smoothing: `20`)."
+
+        return None, "❌ Unknown Filter", "That preset is not supported."
+
+    async def _apply_stored_filter_preset(self, guild_id: int, player: wavelink.Player):
+        preset = self.active_filter_presets.get(guild_id)
+        if not preset:
+            return
+
+        filters, _, _ = self._build_filter_profile(preset)
+        if filters is None:
+            await player.set_filters()
+            return
+
+        await player.set_filters(filters)
+
     def _get_voice_channel_and_store_original(self, guild: discord.Guild, voice_channel: discord.VoiceChannel):
         st = self.voice_status.setdefault(guild.id, {})
         if "original_name" not in st:
@@ -823,6 +964,7 @@ class Music(commands.Cog):
                                 next_track = player.queue.get()
                                 if next_track:
                                     print(f"[Queue] Auto-playing next track: {next_track.title}")
+                                    await self._apply_stored_filter_preset(guild_id, player)
                                     await player.play(next_track)
                                     self.idle_since.pop(guild_id, None)
                             else:
@@ -873,6 +1015,7 @@ class Music(commands.Cog):
                     if not track:
                         continue
 
+                    await self._apply_stored_filter_preset(guild_id, player)
                     await player.play(track)
 
                     title = next_item.get("title") or getattr(track, "title", "Unknown")
@@ -939,6 +1082,12 @@ class Music(commands.Cog):
         
         # Store player reference to keep it alive
         self.active_players[guild_id] = player
+
+        try:
+            await self._apply_stored_filter_preset(guild_id, player)
+        except Exception:
+            pass
+
         return player
 
     @discord.app_commands.command(name="join", description="Join your voice channel")
@@ -1650,7 +1799,14 @@ class Music(commands.Cog):
         discord.app_commands.Choice(name="Nightcore", value="nightcore"),
         discord.app_commands.Choice(name="Slowed", value="slowed"),
         discord.app_commands.Choice(name="Vaporwave", value="vaporwave"),
+        discord.app_commands.Choice(name="Deep", value="deep"),
+        discord.app_commands.Choice(name="Chipmunk", value="chipmunk"),
         discord.app_commands.Choice(name="Bassboost", value="bassboost"),
+        discord.app_commands.Choice(name="Distortion", value="distortion"),
+        discord.app_commands.Choice(name="Robot", value="robot"),
+        discord.app_commands.Choice(name="Telephone", value="telephone"),
+        discord.app_commands.Choice(name="Mono", value="mono"),
+        discord.app_commands.Choice(name="Wide Stereo", value="wide"),
         discord.app_commands.Choice(name="8D / Rotation", value="8d"),
         discord.app_commands.Choice(name="Karaoke", value="karaoke"),
         discord.app_commands.Choice(name="Tremolo", value="tremolo"),
@@ -1673,76 +1829,19 @@ class Music(commands.Cog):
 
         await interaction.response.defer()
 
-        filters = getattr(player, "filters", None) or wavelink.Filters()
-        filters.reset()
-        
         preset_val = preset.value
 
-        if preset_val == "reset":
+        filters, title, description = self._build_filter_profile(preset_val)
+
+        if filters is None:
+            self.active_filter_presets.pop(interaction.guild_id, None)
             await player.set_filters()
-            embed = make_embed("🎚️ Filters Reset", "All audio filters have been removed.")
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=make_embed(title, description))
             return
 
-        elif preset_val == "nightcore":
-            filters.timescale.set(speed=1.2, pitch=1.25, rate=1.0)
-            await player.set_filters(filters)
-            embed = make_embed("🎚️ Nightcore Enabled", "Pitch: `1.25x`, Speed: `1.2x`")
-            await interaction.followup.send(embed=embed)
-
-        elif preset_val == "slowed":
-            filters.timescale.set(speed=0.85, pitch=0.85, rate=1.0)
-            await player.set_filters(filters)
-            embed = make_embed("🎚️ Slowed Enabled", "Pitch: `0.85x`, Speed: `0.85x`")
-            await interaction.followup.send(embed=embed)
-
-        elif preset_val == "vaporwave":
-            filters.timescale.set(speed=0.8, pitch=0.8, rate=1.0)
-            await player.set_filters(filters)
-            embed = make_embed("🎚️ Vaporwave Enabled", "Pitch: `0.80x`, Speed: `0.80x`")
-            await interaction.followup.send(embed=embed)
-
-        elif preset_val == "bassboost":
-            bands = [
-                {"band": 0, "gain": 0.3},
-                {"band": 1, "gain": 0.25},
-                {"band": 2, "gain": 0.20},
-                {"band": 3, "gain": 0.15}
-            ]
-            filters.equalizer.set(bands=bands)
-            await player.set_filters(filters)
-            embed = make_embed("🎚️ Bassboost Enabled", "Low frequencies boosted.")
-            await interaction.followup.send(embed=embed)
-
-        elif preset_val == "8d":
-            filters.rotation.set(rotation_hz=0.2)
-            await player.set_filters(filters)
-            embed = make_embed("🎚️ 8D Audio Enabled", "Sound panning around stereo channels at `0.2 Hz`")
-            await interaction.followup.send(embed=embed)
-
-        elif preset_val == "karaoke":
-            filters.karaoke.set(level=1.0, mono_level=1.0, filter_band=220.0, filter_width=100.0)
-            await player.set_filters(filters)
-            embed = make_embed("🎚️ Karaoke Filter Enabled", "Vocal frequency range attenuated.")
-            await interaction.followup.send(embed=embed)
-
-        elif preset_val == "tremolo":
-            filters.tremolo.set(frequency=4.0, depth=0.6)
-            await player.set_filters(filters)
-            embed = make_embed("🎚️ Tremolo Enabled", "Volume oscillation: `4 Hz`, Depth: `0.6`")
-            await interaction.followup.send(embed=embed)
-
-        elif preset_val == "vibrato":
-            filters.vibrato.set(frequency=4.0, depth=0.6)
-            await player.set_filters(filters)
-            embed = make_embed("🎚️ Vibrato Enabled", "Pitch oscillation: `4 Hz`, Depth: `0.6`")
-            await interaction.followup.send(embed=embed)
-
-        elif preset_val == "lowpass":
-            filters.low_pass.set(smoothing=20.0)
-            await player.set_filters(filters)
-            embed = make_embed("🎚️ LowPass Enabled", "Higher frequencies suppressed (smoothing: `20`)")
-            await interaction.followup.send(embed=embed)
+        self.active_filter_presets[interaction.guild_id] = preset_val
+        await player.set_filters(filters)
+        await interaction.followup.send(embed=make_embed(title, description))
 
     @discord.app_commands.command(name="shuffle", description="Shuffle the music queue")
     async def shuffle(self, interaction: discord.Interaction):
@@ -1848,50 +1947,65 @@ class Music(commands.Cog):
             pass
         
         guild_id = interaction.guild_id
-        
-        # Get current track title/artist from Deezer now-playing cache
-        if guild_id not in self.deezer_now_playing:
-            await self.send_interaction(interaction, content="❌ No track playing.", ephemeral=True)
+        player = interaction.guild.voice_client
+        if not player or not isinstance(player, wavelink.Player):
+            await self.send_interaction(interaction, content="❌ The bot is not in a voice channel.", ephemeral=True)
             return
-        
-        title, artist = self.deezer_now_playing[guild_id]
-        
-        try:
-            # Try to fetch lyrics from Genius API
-            async with aiohttp.ClientSession() as session:
-                headers = {"User-Agent": "CFrame-Bot"}
-                params = {"q": f"{title} {artist}"}
-                async with session.get("https://api.genius.com/search", params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        hits = data.get("response", {}).get("hits", [])
-                        
-                        if hits:
-                            song = hits[0]["result"]
-                            url = song.get("url", "")
-                            artist_name = song.get("primary_artist", {}).get("name", "Unknown")
-                            title_name = song.get("title", "Unknown")
-                            
-                            embed = discord.Embed(
-                                title=f"🎵 {title_name}",
-                                description=f"By {artist_name}\n\n[View Full Lyrics]({url})",
-                                color=0xFFFF64,
-                                url=url
-                            )
-                            embed.set_thumbnail(url=song.get("song_art_image_url", ""))
-                            embed.set_footer(text="Lyrics from Genius")
-                            await self.send_interaction(interaction, embed=embed)
-                            return
-        except Exception as e:
-            print(f"[Lyrics] Genius API error: {e}")
-        
-        # Fallback: show message with track info
-        embed = discord.Embed(
-            title=f"🎵 {title}",
-            description=f"By {artist}\n\n[Search Genius](https://genius.com/search?q={title.replace(' ', '+')}+{artist.replace(' ', '+')})",
-            color=0x2b2d31
-        )
-        await self.send_interaction(interaction, embed=embed)
+
+        title = None
+        artist = None
+
+        if guild_id in self.deezer_now_playing:
+            title, artist = self.deezer_now_playing[guild_id]
+
+        if not title:
+            current_track = getattr(player, "current", None)
+            if not current_track:
+                await self.send_interaction(interaction, content="❌ No track playing.", ephemeral=True)
+                return
+            title = getattr(current_track, "title", "Unknown")
+            artist = getattr(current_track, "author", "Unknown Artist")
+
+        query = f"{title} {artist}".strip()
+        data, track_title, _ = await self._fetch_lavalink_lyrics(player, query=query)
+        if not data or not data.get("text"):
+            await self.send_interaction(interaction, content=f"❌ No lyrics found for **{track_title or title}**.", ephemeral=True)
+            return
+
+        lyrics_text = data["text"]
+        source_name = data.get("sourceName", "Unknown Source")
+        provider = data.get("provider", "LavaLyrics")
+
+        chunks = []
+        current_chunk = ""
+        for line in lyrics_text.splitlines():
+            if len(current_chunk) + len(line) + 2 > 3500:
+                chunks.append(current_chunk)
+                current_chunk = line + "\n"
+            else:
+                current_chunk += line + "\n"
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        for idx, chunk in enumerate(chunks):
+            page_title = f"🎤 Lyrics: {track_title or title}"
+            if len(chunks) > 1:
+                page_title += f" (Part {idx + 1}/{len(chunks)})"
+
+            embed = discord.Embed(
+                title=page_title,
+                description=chunk,
+                color=0x2b2d31,
+            )
+            embed.set_footer(text=f"Source: {source_name} via {provider}")
+
+            if idx == 0:
+                if interaction.response.is_done():
+                    await interaction.followup.send(embed=embed)
+                else:
+                    await interaction.response.send_message(embed=embed)
+            else:
+                await interaction.followup.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
