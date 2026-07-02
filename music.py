@@ -594,14 +594,14 @@ class Music(commands.Cog):
 
         # Wait for Discord CDN to be available and indexed by Lavalink
         print(f"[CDN] CDN URL: {cdn_url[:100]}...")
-        print(f"[CDN] Waiting 5 seconds for Discord CDN to be indexed...")
-        await asyncio.sleep(5)
+        print(f"[CDN] Waiting 2 seconds for Discord CDN to be indexed...")
+        await asyncio.sleep(2)
 
         # Try to load track via Lavalink REST API endpoint with retry logic
         track = None
-        for attempt in range(1, 6):  # Increased to 5 attempts
+        for attempt in range(1, 7):  # 6 attempts with short waits = fast
             try:
-                print(f"[CDN] Attempt {attempt}/5: Loading track from CDN URL via Lavalink")
+                print(f"[CDN] Attempt {attempt}/6: Loading from CDN")
                 
                 # Get Lavalink node
                 node = wavelink.Pool.get_node()
@@ -609,48 +609,45 @@ class Music(commands.Cog):
                     raise RuntimeError("No Lavalink node available")
                 
                 # Use Lavalink's REST endpoint to load tracks
-                # Lavalink v4 uses GET /v4/loadtracks with query parameters
                 async with aiohttp.ClientSession() as session:
                     headers = {"Authorization": node.password}
                     base_url = node.uri.replace('ws://', 'http://').replace('wss://', 'https://')
                     url = f"{base_url}/v4/loadtracks"
                     
-                    # Use GET with query parameters for Lavalink v4
-                    async with session.get(url, headers=headers, params={"identifier": cdn_url}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    async with session.get(url, headers=headers, params={"identifier": cdn_url}, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                         if resp.status == 200:
                             data = await resp.json()
                             load_type = data.get('loadType', 'unknown')
-                            data_list = data.get('data')
+                            data_obj = data.get('data')
                             
-                            print(f"[CDN] Response: loadType={load_type}, data_type={type(data_list).__name__}, data_len={len(data_list) if data_list else 0}")
-                            
-                            if load_type == "track" and data_list and len(data_list) > 0:
-                                track_data = data_list[0]
-                                print(f"[CDN] ✓ Track loaded successfully from Lavalink on attempt {attempt}")
-                                track = wavelink.Playable(track_data)
+                            # Handle different loadType responses
+                            if load_type == "track" and data_obj:
+                                print(f"[CDN] ✓ Track loaded on attempt {attempt}")
+                                track = wavelink.Playable(data_obj)
                                 break
-                            elif load_type == "search" and data_list and len(data_list) > 0:
-                                track_data = data_list[0]
-                                print(f"[CDN] ✓ Search result found from Lavalink on attempt {attempt}")
-                                track = wavelink.Playable(track_data)
+                            elif load_type == "search" and isinstance(data_obj, list) and len(data_obj) > 0:
+                                print(f"[CDN] ✓ Found via search on attempt {attempt}")
+                                track = wavelink.Playable(data_obj[0])
                                 break
-                            else:
-                                print(f"[CDN] No results yet (loadType={load_type}), retrying...")
-                        else:
-                            print(f"[CDN] HTTP {resp.status}, retrying...")
+                            elif load_type == "playlist" and isinstance(data_obj, dict) and 'tracks' in data_obj:
+                                tracks = data_obj.get('tracks', [])
+                                if len(tracks) > 0:
+                                    print(f"[CDN] ✓ Playlist found on attempt {attempt}")
+                                    track = wavelink.Playable(tracks[0])
+                                    break
                 
-                if not track and attempt < 5:
-                    wait_time = 3 + (attempt * 2)  # Progressively longer waits: 5s, 7s, 9s, 11s
-                    print(f"[CDN] Track not loaded, waiting {wait_time} seconds before attempt {attempt + 1}...")
+                if not track and attempt < 6:
+                    # Short waits: 1s, 1.5s, 2s, 2.5s, 3s
+                    wait_time = 0.5 + (attempt * 0.5)
                     await asyncio.sleep(wait_time)
             except Exception as e:
-                print(f"[CDN] ✗ Attempt {attempt} error: {type(e).__name__}: {e}")
-                if attempt < 5:
-                    wait_time = 3 + (attempt * 2)
+                print(f"[CDN] Attempt {attempt} error: {type(e).__name__}")
+                if attempt < 6:
+                    wait_time = 0.5 + (attempt * 0.5)
                     await asyncio.sleep(wait_time)
 
         if not track:
-            raise RuntimeError("Lavalink could not load track from Discord CDN after 5 attempts")
+            raise RuntimeError("Lavalink could not load track from Discord CDN")
 
         guild_id = interaction.guild.id
 
