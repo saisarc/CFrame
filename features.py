@@ -128,6 +128,11 @@ async def save_guild_settings(guild_id: int, settings: dict):
     """Persist guild settings to Mongo when configured; always update in-memory cache."""
     gid = str(guild_id)
     state["guild_settings"][gid] = settings
+    print(
+        "[settings] save_guild_settings called "
+        f"guild_id={guild_id} "
+        f"mongo_enabled={'yes' if bool(os.getenv('MONGODB_URI')) else 'no'}"
+    )
 
     if os.getenv("MONGODB_URI"):
         try:
@@ -141,8 +146,16 @@ async def save_guild_settings(guild_id: int, settings: dict):
             )
         except Exception:
             # avoid crashing moderation features if DB is temporarily down
-            print(f"[mongo] failed to save guild_settings guild_id={guild_id}")
+            import traceback
+            print(
+                f"[mongo] failed to save guild_settings guild_id={guild_id}: "
+                f"{traceback.format_exc().strip()}"
+            )
             return
+    else:
+        print(
+            "[mongo] skipped guild_settings save because MONGODB_URI is not set in this process"
+        )
 
 
 def save_state():
@@ -627,6 +640,10 @@ class Features(commands.Cog):
             await interaction.response.send_message("❌ You need Manage Server permissions.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
+        print(
+            f"[settings] /setlogchannel requested guild_id={interaction.guild_id} "
+            f"channel_id={channel.id} by={interaction.user.id}"
+        )
         settings = await load_guild_settings(interaction.guild_id)
         settings["log_channel_id"] = channel.id
         await save_guild_settings(interaction.guild_id, settings)
@@ -655,6 +672,10 @@ class Features(commands.Cog):
             await interaction.response.send_message("❌ You need Manage Server permissions.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
+        print(
+            f"[settings] /setwelcomechannel requested guild_id={interaction.guild_id} "
+            f"channel_id={channel.id} by={interaction.user.id}"
+        )
         settings = await load_guild_settings(interaction.guild_id)
         settings["welcome_channel_id"] = channel.id
         await save_guild_settings(interaction.guild_id, settings)
