@@ -847,6 +847,19 @@ class Music(commands.Cog):
                     if not player or not player.connected:
                         self.active_players.pop(guild_id, None)
                 
+                # Auto-play next queued track from Wavelink queue if nothing is playing
+                for guild_id, player in list(self.active_players.items()):
+                    try:
+                        if player and player.connected and not player.is_playing():
+                            # Check if player has queued tracks
+                            if player.queue and len(player.queue) > 0:
+                                next_track = player.queue.get()
+                                if next_track:
+                                    print(f"[Queue] Auto-playing next track: {next_track.title}")
+                                    await player.play(next_track)
+                    except Exception as e:
+                        print(f"[Queue] Error checking auto-play for guild {guild_id}: {e}")
+                
                 # Process queued tracks
                 for guild_id, q in list(self.queues.items()):
                     guild = self.bot.get_guild(guild_id)
