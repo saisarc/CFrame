@@ -282,6 +282,27 @@ class Music(commands.Cog):
         bot.loop.create_task(self.connect_node())
         bot.loop.create_task(self.queue_worker())
 
+    @wavelink.WaveLink.listen()
+    async def on_track_end(self, payload: wavelink.TrackEndEvent) -> None:
+        """Auto-play next queued track when current one finishes."""
+        try:
+            player = payload.player
+            if not player:
+                return
+            
+            # Check if there's a next track in Wavelink's queue
+            if player.queue.is_empty:
+                # No more tracks, we're done
+                return
+            
+            # Play the next track from queue
+            next_track = player.queue.get()
+            if next_track:
+                print(f"[Queue] Auto-playing next track: {next_track.title}")
+                await player.play(next_track)
+        except Exception as e:
+            print(f"[Queue] Error auto-playing next track: {e}")
+
     async def cleanup_ffmpeg_player(self, guild_id: int):
         """Cleanly disconnect active Lavalink player before switching to FFmpeg."""
         try:
@@ -594,8 +615,8 @@ class Music(commands.Cog):
 
         # Wait for Discord CDN to be available and indexed by Lavalink
         print(f"[CDN] CDN URL: {cdn_url[:100]}...")
-        print(f"[CDN] Waiting 2 seconds for Discord CDN to be indexed...")
-        await asyncio.sleep(2)
+        print(f"[CDN] Waiting 3.5 seconds for Discord CDN to be indexed...")
+        await asyncio.sleep(3.5)
 
         # Try to load track via Lavalink REST API endpoint with retry logic
         track = None
@@ -607,7 +628,7 @@ class Music(commands.Cog):
                 node = wavelink.Pool.get_node()
                 if not node:
                     raise RuntimeError("No Lavalink node available")
-                
+              
                 # Use Lavalink's REST endpoint to load tracks
                 async with aiohttp.ClientSession() as session:
                     headers = {"Authorization": node.password}
