@@ -151,17 +151,27 @@ class Music(commands.Cog):
         except Exception:
             return False
 
-    async def send_interaction(self, interaction: discord.Interaction, content: str = None, embed: discord.Embed = None, ephemeral: bool = False):
+    async def send_interaction(self, interaction: discord.Interaction, content: str = None, embed: discord.Embed = None, ephemeral: bool = False, view: discord.ui.View = None):
         kwargs = {"ephemeral": ephemeral}
         if content:
             kwargs["content"] = content
         if embed:
             kwargs["embed"] = embed
+        if view is not None:
+            kwargs["view"] = view
 
-        if interaction.response.is_done():
-            await interaction.followup.send(**kwargs)
-        else:
-            await interaction.response.send_message(**kwargs)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(**kwargs)
+            else:
+                await interaction.response.send_message(**kwargs)
+        except Exception:
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.defer()
+                await interaction.followup.send(**kwargs)
+            except Exception:
+                pass
 
     async def ensure_lavalink(self, interaction: discord.Interaction):
         if await self.is_node_connected():
@@ -400,10 +410,7 @@ class Music(commands.Cog):
         )
 
         try:
-            if interaction.response.is_done():
-                await interaction.followup.send(embed=embed)
-            else:
-                await interaction.response.send_message(embed=embed)
+            await self.send_interaction(interaction, embed=embed)
         except Exception as response_error:
             print(f"Failed to finish interaction response: {response_error}")
             try:
@@ -448,7 +455,7 @@ class Music(commands.Cog):
                         color=0x2b2d31,
                     )
                     embed.add_field(name="Options", value="YouTube • Spotify • Apple Music", inline=False)
-                    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+                    await self.send_interaction(interaction, embed=embed, ephemeral=True, view=view)
                     return
 
             results = await wavelink.Pool.fetch_tracks(search_query)

@@ -1,6 +1,37 @@
 import unittest
 
-from music import normalize_query_for_lavalink
+from music import Music, normalize_query_for_lavalink
+
+
+class DummyResponse:
+    def __init__(self):
+        self.done = False
+        self.messages = []
+
+    def is_done(self):
+        return self.done
+
+    async def send_message(self, **kwargs):
+        self.done = True
+        self.messages.append(("send_message", kwargs))
+
+    async def defer(self, **kwargs):
+        self.done = True
+        self.messages.append(("defer", kwargs))
+
+
+class DummyFollowup:
+    def __init__(self):
+        self.messages = []
+
+    async def send(self, **kwargs):
+        self.messages.append(kwargs)
+
+
+class DummyInteraction:
+    def __init__(self):
+        self.response = DummyResponse()
+        self.followup = DummyFollowup()
 
 
 class NormalizeQueryTests(unittest.TestCase):
@@ -24,6 +55,23 @@ class NormalizeQueryTests(unittest.TestCase):
 
     def test_plain_text_defaults_to_youtube(self):
         self.assertEqual(normalize_query_for_lavalink("Never Gonna Give You Up"), "ytsearch:Never Gonna Give You Up")
+
+    def test_send_interaction_uses_followup_when_response_already_done(self):
+        cog = Music.__new__(Music)
+        interaction = DummyInteraction()
+
+        async def run_test():
+            interaction.response.done = True
+            await cog.send_interaction(interaction, content="ok", ephemeral=True)
+            return interaction.followup.messages
+
+        messages = unittest.IsolatedAsyncioTestCase().runTest = None
+        import asyncio
+
+        result = asyncio.run(run_test())
+        self.assertEqual(len(result), 1)
+        self.assertIn("content", result[0])
+        self.assertEqual(result[0]["content"], "ok")
 
 
 if __name__ == "__main__":
