@@ -573,16 +573,21 @@ class Music(commands.Cog):
         Upload a local audio file to Discord CDN then play via Lavalink.
         Avoids discord.py native voice UDP (blocked on Railway).
         """
+        print(f"[CDN] Starting CDN playback for: {title} - {artist}")
+        print(f"[CDN] File path: {file_path}")
+        
         # Upload file to Discord to get a streamable CDN URL
         try:
             f = discord.File(file_path, filename=Path(file_path).name)
             upload_msg = await interaction.channel.send(file=f)
             cdn_url = upload_msg.attachments[0].url
+            print(f"[CDN] File uploaded, CDN URL obtained (length: {len(cdn_url)})")
             try:
                 await upload_msg.delete()
             except Exception:
                 pass
         except Exception as e:
+            print(f"[CDN] Upload failed: {e}")
             raise RuntimeError(f"Could not upload file to Discord CDN: {e}")
 
         # Ensure Lavalink and voice
@@ -620,6 +625,8 @@ class Music(commands.Cog):
                             load_type = data.get('loadType', 'unknown')
                             data_obj = data.get('data')
                             
+                            print(f"[CDN] Response: loadType={load_type}, dataObj={'present' if data_obj else 'null'}")
+                            
                             # Handle different loadType responses
                             if load_type == "track" and data_obj:
                                 print(f"[CDN] ✓ Track loaded on attempt {attempt}")
@@ -635,19 +642,33 @@ class Music(commands.Cog):
                                     print(f"[CDN] ✓ Playlist found on attempt {attempt}")
                                     track = wavelink.Playable(tracks[0])
                                     break
+                        else:
+                            print(f"[CDN] HTTP {resp.status} response")
                 
                 if not track and attempt < 6:
                     # Short waits: 1s, 1.5s, 2s, 2.5s, 3s
                     wait_time = 0.5 + (attempt * 0.5)
                     await asyncio.sleep(wait_time)
             except Exception as e:
-                print(f"[CDN] Attempt {attempt} error: {type(e).__name__}")
+                print(f"[CDN] Attempt {attempt} error: {type(e).__name__}: {e}")
                 if attempt < 6:
                     wait_time = 0.5 + (attempt * 0.5)
                     await asyncio.sleep(wait_time)
 
+        # Fallback to YouTube search if CDN failed
         if not track:
-            raise RuntimeError("Lavalink could not load track from Discord CDN")
+            print(f"[CDN] CDN failed after 6 attempts, falling back to YouTube search: {title} {artist}")
+            try:
+                search_query = f"ytsearch:{title} {artist}"
+                results = await player.node.get_playlist(search_query)
+                if results and len(results.tracks) > 0:
+                    track = results.tracks[0]
+                    print(f"[CDN] ✓ YouTube fallback found: {track.title}")
+            except Exception as e:
+                print(f"[CDN] YouTube fallback error: {e}")
+        
+        if not track:
+            raise RuntimeError("Could not load track from CDN or YouTube fallback")
 
         guild_id = interaction.guild.id
 
