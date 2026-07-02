@@ -284,16 +284,20 @@ class GameCommands(commands.Cog):
         await interaction.response.defer()
 
         uptime_secs = int(time.time() - self.start_time)
-        h, rem = divmod(uptime_secs, 3600)
+        d, rem = divmod(uptime_secs, 86400)
+        h, rem = divmod(rem, 3600)
         m, s = divmod(rem, 60)
+        started_ts = int(self.start_time)
 
-        cpu = psutil.cpu_percent(interval=0.5)
+        cpu = psutil.cpu_percent(interval=0.2)
         try:
             ram_percent = psutil.virtual_memory().percent
         except Exception:
             ram_percent = "N/A"
 
         total_users = sum(g.member_count or 0 for g in self.bot.guilds)
+        latency_ms = round(self.bot.latency * 1000)
+        latency_state = "Excellent" if latency_ms < 120 else ("Good" if latency_ms < 250 else "High")
 
         # More professional RAM: percent + bot RSS (host process memory)
         try:
@@ -303,22 +307,41 @@ class GameCommands(commands.Cog):
         except Exception:
             ram_field = f"{ram_percent}%" if ram_percent != "N/A" else "N/A"
 
+        # Service readiness snapshot
+        ai_ready = bool(os.getenv("GROQ_API_KEY", "").strip())
+        music_cog = self.bot.get_cog("Music")
+        lavalink_ready = False
+        active_music_guilds = 0
+        if music_cog:
+            try:
+                lavalink_ready = await music_cog.is_node_connected()
+            except Exception:
+                lavalink_ready = False
+            try:
+                active_music_guilds = len(getattr(music_cog, "active_players", {}) or {})
+            except Exception:
+                active_music_guilds = 0
+
         embed = discord.Embed(
             title="🟢 CFrame Status",
-            description="Diagnostics for uptime, performance, and bot readiness.",
+            description="Live runtime diagnostics for bot health and service readiness.",
             color=0x57F287,
         )
 
         embed.add_field(name="Status", value="Online ✅", inline=True)
-        embed.add_field(name="Uptime", value=f"{h}h {m}m {s}s", inline=True)
-        embed.add_field(name="Latency", value=f"{round(self.bot.latency * 1000)}ms", inline=True)
+        embed.add_field(name="Latency", value=f"{latency_ms}ms ({latency_state})", inline=True)
+        embed.add_field(name="Uptime", value=f"{d}d {h}h {m}m {s}s", inline=True)
 
         embed.add_field(name="CPU", value=f"{cpu}%", inline=True)
         embed.add_field(name="RAM", value=ram_field, inline=True)
+        embed.add_field(name="Started", value=f"<t:{started_ts}:R>", inline=True)
 
-        embed.add_field(name="AI", value="Ready", inline=True)
+        embed.add_field(name="AI", value="Ready ✅" if ai_ready else "Missing API Key ⚠️", inline=True)
+        embed.add_field(name="Lavalink", value="Connected ✅" if lavalink_ready else "Disconnected ⚠️", inline=True)
+        embed.add_field(name="Music Sessions", value=f"{active_music_guilds}", inline=True)
         embed.add_field(name="Servers", value=f"{len(self.bot.guilds)}", inline=True)
         embed.add_field(name="Users", value=f"{total_users:,}", inline=True)
+        embed.add_field(name="Commands", value=f"{len(self.bot.tree.get_commands())}", inline=True)
         
         # Guild-specific music info
         guild = interaction.guild
@@ -354,7 +377,8 @@ class GameCommands(commands.Cog):
             value=(
                 "• Uptime + latency are live runtime values\n"
                 "• CPU/RAM reflect the host machine\n"
-                "• Guild status shows this server's voice and queue info\n"
+                "• Guild status is scoped to this server\n"
+                "• Lavalink/Music fields indicate playback readiness\n"
                 "• Use `/help` for command navigation"
             ),
             inline=False,

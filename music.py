@@ -606,8 +606,8 @@ class Music(commands.Cog):
             try:
                 search_query = f"ytsearch:{title} {artist}"
                 results = await wavelink.Pool.fetch_tracks(search_query)
-                if results and len(results) > 0:
-                    track = results[0]
+                track = results[0] if isinstance(results, list) and results else (results.tracks[0] if getattr(results, "tracks", None) else None)
+                if track:
                     print(f"[CDN] ✓ YouTube fallback found: {track.title}")
             except Exception as e:
                 print(f"[CDN] YouTube fallback error: {e}")
@@ -724,6 +724,16 @@ class Music(commands.Cog):
                 await interaction.followup.send(**kwargs)
             except Exception:
                 pass
+
+    async def send_status_update(self, interaction: discord.Interaction, step: str, detail: str | None = None):
+        """Send a small ephemeral progress update for long-running operations."""
+        embed = discord.Embed(color=0x5865F2)
+        embed.set_author(name="Working on your request...")
+        embed.description = f"**{step}**" + (f"\n{detail}" if detail else "")
+        try:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception:
+            pass
 
     async def ensure_lavalink(self, interaction: discord.Interaction):
         if await self.is_node_connected():
@@ -1230,7 +1240,7 @@ class Music(commands.Cog):
             except Exception:
                 pass
 
-        await send_log(self.bot, "COMMAND", f"{interaction.user} {status_text.lower()}: `{item[title]}`")
+        await send_log(self.bot, "COMMAND", f"{interaction.user} {status_text.lower()}: `{item['title']}`")
 
     @discord.app_commands.command(name="play", description="Play a song — tries Deezer first, falls back to YouTube")
     @discord.app_commands.describe(query="Song name or URL")
@@ -1243,12 +1253,16 @@ class Music(commands.Cog):
         except Exception:
             pass
 
+        await self.send_status_update(interaction, "Searching for a playable source...", f"Query: `{query[:120]}`")
+
         # === Direct URL path ===
         if query.startswith(("http://", "https://", "spotify:")):
             # Deezer URL
             if is_deezer_query(query):
                 try:
+                    await self.send_status_update(interaction, "Deezer link detected", "Downloading track and preparing stream...")
                     file_path, title, artist, album_art = await self.download_deezer_track(query)
+                    await self.send_status_update(interaction, "Deezer download complete", "Loading the track into Lavalink...")
                     await self.play_via_lavalink_from_file(interaction, file_path, title, artist, album_art)
                 except Exception as e:
                     await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
@@ -1256,6 +1270,7 @@ class Music(commands.Cog):
 
             # Other URL (YouTube, Spotify, etc.)
             try:
+                await self.send_status_update(interaction, "Resolving URL", "Contacting Lavalink and fetching the track...")
                 await self.ensure_lavalink(interaction)
                 player = await self.ensure_voice(interaction)
                 search_query = normalize_query_for_lavalink(query)
@@ -1273,10 +1288,12 @@ class Music(commands.Cog):
         deezer_ok = False
         if DEEMIX_AVAILABLE and os.getenv("DEEZER_ARL_TOKEN", "").strip():
             try:
+                await self.send_status_update(interaction, "Checking Deezer first", "Trying to find the best match...")
                 tracks = await search_deezer_tracks(query)
                 if tracks:
                     track_id = tracks[0]["id"]
                     album_art = tracks[0].get("album_art")
+                    await self.send_status_update(interaction, "Deezer match found", "Downloading and preparing playback...")
                     file_path, title, artist, _ = await self.download_deezer_track(str(track_id))
                     await self.play_via_lavalink_from_file(interaction, file_path, title, artist, album_art)
                     deezer_ok = True
@@ -1285,10 +1302,11 @@ class Music(commands.Cog):
 
         if not deezer_ok:
             try:
+                await self.send_status_update(interaction, "Using YouTube fallback", "Searching YouTube for a playable result...")
                 await self.ensure_lavalink(interaction)
                 player = await self.ensure_voice(interaction)
                 results = await wavelink.Pool.fetch_tracks(f"ytsearch:{query}")
-                track = results[0] if isinstance(results, list) and results else None
+                track = results[0] if isinstance(results, list) and results else (results.tracks[0] if getattr(results, "tracks", None) else None)
                 if not track:
                     await self.send_interaction(interaction, content="❌ No results found.", ephemeral=True)
                     return

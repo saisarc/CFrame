@@ -1,0 +1,24 @@
+.git
+.gitignore
+.vscode
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+.DS_Store
+.env
+.env.*
+.pytest_cache
+.mypy_cache
+.coverage
+htmlcov
+
+# Local runtime/state files
+bot_data.json
+
+# Non-runtime docs/tests
+tests/
+DEPLOY_*.md
+DEEMIX_SUPPORT.md
