@@ -816,8 +816,6 @@ class Music(commands.Cog):
 
     def _get_voice_channel_and_store_original(self, guild: discord.Guild, voice_channel: discord.VoiceChannel):
         st = self.voice_status.setdefault(guild.id, {})
-        if "original_name" not in st:
-            st["original_name"] = voice_channel.name
         if "voice_status_enabled" not in st:
             st["voice_status_enabled"] = False
         if "voice_status_suffix" not in st:
@@ -826,42 +824,38 @@ class Music(commands.Cog):
 
     async def _update_voice_status(self, player: wavelink.Player, track_title: str):
         guild = player.guild
-        voice_client = guild.voice_client
-        if not voice_client or not voice_client.channel:
+        if not player or not player.channel:
             return
 
         st = self.voice_status.get(guild.id)
         if not st or not st.get("voice_status_enabled"):
             return
 
-        channel = voice_client.channel
+        channel = player.channel
         suffix = st.get("voice_status_suffix") or "🎵 {title}"
-        # Discord channel name limit is 100 characters.
-        new_name = f"{st.get('original_name', channel.name)} | {suffix.replace('{title}', track_title)}"
-        if len(new_name) > 100:
-            new_name = new_name[:97] + "..."
+        # Discord channel status limit is 500 characters.
+        status_text = suffix.replace('{title}', track_title)
+        if len(status_text) > 500:
+            status_text = status_text[:497] + "..."
 
         try:
-            if channel.name != new_name:
-                await channel.edit(name=new_name)
-        except Exception:
-            pass
+            if channel.status != status_text:
+                await channel.edit(status=status_text)
+        except Exception as e:
+            print(f"[Voice Status] Failed to update status: {e}")
 
     async def _restore_voice_status(self, guild: discord.Guild):
         st = self.voice_status.get(guild.id)
         if not st:
             return
-        voice_client = guild.voice_client
-        if not voice_client or not voice_client.channel:
-            return
-        original = st.get("original_name")
-        if not original:
+        player = self.active_players.get(guild.id)
+        if not player or not player.channel:
             return
         try:
-            if voice_client.channel.name != original:
-                await voice_client.channel.edit(name=original)
-        except Exception:
-            pass
+            if player.channel.status:
+                await player.channel.edit(status=None)
+        except Exception as e:
+            print(f"[Voice Status] Failed to clear status: {e}")
 
     async def queue_worker(self):
         await self.bot.wait_until_ready()
@@ -1301,13 +1295,14 @@ class Music(commands.Cog):
             return
 
         # Require bot to be in voice
-        voice_client = interaction.guild.voice_client
-        if not voice_client or not voice_client.channel:
+        guild_id = interaction.guild.id
+        player = self.active_players.get(guild_id)
+        if not player or not player.channel:
             await interaction.response.send_message("❌ I'm not connected to a voice channel.", ephemeral=True)
             return
 
         # store original name
-        st = self._get_voice_channel_and_store_original(interaction.guild, voice_client.channel)
+        st = self._get_voice_channel_and_store_original(interaction.guild, player.channel)
         st["voice_status_enabled"] = True
         if suffix:
             st["voice_status_suffix"] = suffix
@@ -1315,9 +1310,9 @@ class Music(commands.Cog):
 
         # if currently playing, update immediately
         try:
-            if voice_client.playing:
-                title = getattr(getattr(voice_client, "track", None), "title", None) or "Unknown"
-                await self._update_voice_status(voice_client, title)
+            if player.playing:
+                title = getattr(getattr(player, "current", None), "title", None) or "Unknown"
+                await self._update_voice_status(player, title)
         except Exception:
             pass
 
