@@ -276,6 +276,9 @@ class Music(commands.Cog):
         # Tracks currently playing via Deezer CDN: guild_id -> (title, artist)
         self.deezer_now_playing: dict[int, tuple[str, str]] = {}
 
+        # Track active players per guild to support simultaneous music playback
+        self.active_players: dict[int, wavelink.Player] = {}
+
         bot.loop.create_task(self.connect_node())
         bot.loop.create_task(self.queue_worker())
 
@@ -714,6 +717,18 @@ class Music(commands.Cog):
         await self.bot.wait_until_ready()
         while True:
             try:
+                # Clean up disconnected players from active_players dict
+                for guild_id in list(self.active_players.keys()):
+                    guild = self.bot.get_guild(guild_id)
+                    if not guild or not guild.voice_client:
+                        self.active_players.pop(guild_id, None)
+                        continue
+                    
+                    player = self.active_players[guild_id]
+                    if not player or not player.connected:
+                        self.active_players.pop(guild_id, None)
+                
+                # Process queued tracks
                 for guild_id, q in list(self.queues.items()):
                     guild = self.bot.get_guild(guild_id)
                     if not guild or not guild.voice_client:
@@ -777,14 +792,42 @@ class Music(commands.Cog):
             raise RuntimeError("user not in voice channel")
             
         channel = interaction.user.voice.channel
+        guild_id = interaction.guild_id
+        
+        # Check if we have an active player for this guild already
+        if guild_id in self.active_players:
+            player = self.active_players[guild_id]
+            if player and player.channel == channel:
+                return player
+            elif player:
+                # Player exists but in wrong channel, move it
+                try:
+                    await player.move_to(channel)
+                    return player
+                except Exception:
+                    # If move fails, disconnect and reconnect
+                    del self.active_players[guild_id]
+        
+        # No active player for this guild, create one
         voice_client = interaction.guild.voice_client
-        if not voice_client:
-            player = await channel.connect(cls=wavelink.Player)
-            return player
-        else:
-            if voice_client.channel != channel:
+        if voice_client and voice_client.channel != channel:
+            # Connected to different channel, move it
+            try:
                 await voice_client.move_to(channel)
-            return voice_client
+                player = voice_client
+            except Exception:
+                # Move failed, create fresh connection
+                player = await channel.connect(cls=wavelink.Player, self_deaf=True)
+        elif voice_client:
+            # Already connected to correct channel
+            player = voice_client
+        else:
+            # Not connected at all, create new connection
+            player = await channel.connect(cls=wavelink.Player, self_deaf=True)
+        
+        # Store player reference to keep it alive
+        self.active_players[guild_id] = player
+        return player
 
     @discord.app_commands.command(name="join", description="Join your voice channel")
     async def join(self, interaction: discord.Interaction):
@@ -813,12 +856,14 @@ class Music(commands.Cog):
     async def leave(self, interaction: discord.Interaction):
         if await blocked(interaction):
             return
+        guild_id = interaction.guild.id
         voice_client = interaction.guild.voice_client
         if not voice_client:
             await interaction.response.send_message("❌ I'm currently not in a voice channel.", ephemeral=True)
             return
         await voice_client.disconnect()
-        self.queues.pop(interaction.guild.id, None)
+        self.queues.pop(guild_id, None)
+        self.active_players.pop(guild_id, None)
         
         embed = make_embed("👋 Disconnected", "Successfully cleared the queue and left the channel.")
         await interaction.response.send_message(embed=embed)

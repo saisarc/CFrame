@@ -319,12 +319,42 @@ class GameCommands(commands.Cog):
         embed.add_field(name="AI", value="Ready", inline=True)
         embed.add_field(name="Servers", value=f"{len(self.bot.guilds)}", inline=True)
         embed.add_field(name="Users", value=f"{total_users:,}", inline=True)
+        
+        # Guild-specific music info
+        guild = interaction.guild
+        if guild:
+            voice_client = guild.voice_client
+            guild_status_value = f"**Server:** {guild.name}\n"
+            
+            if voice_client:
+                if hasattr(voice_client, 'channel') and voice_client.channel:
+                    guild_status_value += f"**Voice:** In {voice_client.channel.name} ✅\n"
+                    member_count = len(voice_client.channel.members)
+                    guild_status_value += f"**Members:** {member_count} in voice\n"
+                else:
+                    guild_status_value += "**Voice:** Connected\n"
+                
+                # Get queue info
+                if hasattr(voice_client, 'current'):
+                    current = voice_client.current
+                    if current:
+                        title = getattr(current, 'title', 'Unknown')
+                        guild_status_value += f"**Now Playing:** {title}\n"
+                
+                if hasattr(voice_client, 'queue'):
+                    queue_len = len(voice_client.queue) if voice_client.queue else 0
+                    guild_status_value += f"**Queued:** {queue_len} tracks"
+            else:
+                guild_status_value += "**Voice:** Not connected"
+            
+            embed.add_field(name="📊 Guild Music Status", value=guild_status_value, inline=False)
 
         embed.add_field(
             name="Notes",
             value=(
                 "• Uptime + latency are live runtime values\n"
                 "• CPU/RAM reflect the host machine\n"
+                "• Guild status shows this server's voice and queue info\n"
                 "• Use `/help` for command navigation"
             ),
             inline=False,
