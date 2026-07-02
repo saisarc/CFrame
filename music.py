@@ -176,105 +176,6 @@ def make_embed(title: str, description: str, color: int = 0x2b2d31, thumbnail: s
     embed.set_footer(text="CFrame Music • Lavalink")
     return embed
 
-class SourceSelectionView(discord.ui.View):
-    def __init__(self, cog, interaction: discord.Interaction, query: str):
-        super().__init__(timeout=60)
-        self.cog = cog
-        self.interaction = interaction
-        self.query = query
-
-    async def handle_selection(self, interaction: discord.Interaction, prefix: str):
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-        except Exception:
-            pass
-
-        # Special handling for Deezer search
-        if prefix == "deezer":
-            try:
-                tracks = await search_deezer_tracks(self.query)
-                
-                if not tracks:
-                    await self.cog.send_interaction(
-                        interaction,
-                        content="❌ No Deezer tracks found for that query. Try another search or source.",
-                        ephemeral=True,
-                    )
-                    return
-
-                # Use the first result
-                track_id = tracks[0]["id"]
-                
-                # Download and play
-                file_path, title, artist, album_art = await self.cog.download_deezer_track(str(track_id))
-                await self.cog.play_via_lavalink_from_file(interaction, file_path, title, artist, album_art)
-
-            except Exception as e:
-                await self.cog.send_interaction(
-                    interaction,
-                    content=f"❌ Deezer error: `{e}`",
-                    ephemeral=True,
-                )
-            return
-
-        if prefix == "spsearch" and not spotify_credentials_configured():
-            await self.cog.send_interaction(
-                interaction,
-                content="⚠️ Spotify search is unavailable on this deployment because Lavalink is missing Spotify credentials. Please use Apple Music or a direct URL instead.",
-                ephemeral=True,
-            )
-            return
-
-        if prefix == "amsearch":
-            await self.cog.send_interaction(
-                interaction,
-                content="⚠️ Apple Music search is currently unavailable in this deployment because Lavalink's Apple Music provider is failing. Please use a direct URL or another source.",
-                ephemeral=True,
-            )
-            return
-
-        search_query = f"{prefix}:{self.query}"
-        try:
-            results = await wavelink.Pool.fetch_tracks(search_query)
-            track = None
-            if isinstance(results, list):
-                track = results[0] if results else None
-            else:
-                track = results.tracks[0] if getattr(results, "tracks", None) else None
-
-            if not track:
-                await self.cog.send_interaction(interaction, content="❌ No audio tracks found for that query.", ephemeral=True)
-                return
-
-            await self.cog.process_play_track(interaction, track)
-        except Exception as e:
-            message = str(e).lower()
-            if prefix == "spsearch" and ("forbidden" in message or "403" in message or "something went wrong while looking up the track" in message):
-                await self.cog.send_interaction(
-                    interaction,
-                    content="⚠️ Spotify lookup failed. Lavalink is missing or rejecting the Spotify credentials. Please use a direct URL or another source.",
-                    ephemeral=True,
-                )
-            else:
-                await self.cog.send_interaction(interaction, content=f"❌ Error: `{e}`", ephemeral=True)
-
-    @discord.ui.button(label="YouTube", style=discord.ButtonStyle.danger, emoji="🔴")
-    async def youtube_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_selection(interaction, source_to_search_prefix("youtube"))
-
-    @discord.ui.button(label="Spotify", style=discord.ButtonStyle.success, emoji="🟢")
-    async def spotify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_selection(interaction, source_to_search_prefix("spotify"))
-
-    @discord.ui.button(label="Apple Music", style=discord.ButtonStyle.secondary, emoji="🍎")
-    async def apple_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_selection(interaction, source_to_search_prefix("apple music"))
-
-    @discord.ui.button(label="Deezer", style=discord.ButtonStyle.blurple, emoji="🔵")
-    async def deezer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_selection(interaction, "deezer")
-
 class Music(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -735,18 +636,17 @@ class Music(commands.Cog):
         # Store metadata for lyrics
         self.deezer_now_playing[guild_id] = (title, artist)
 
-        embed = discord.Embed(
-            title="🎧 Now playing" if status == "Now playing" else "📥 Added to Queue",
-            description=f"**{title}**",
-            color=0x2b2d31,
-        )
-        embed.add_field(name="Channel / Artist", value=f"`{artist}`", inline=True)
+        if status == "Now playing":
+            embed = discord.Embed(description=f"### {title}", color=0x1DB954)
+            embed.set_author(name="Now Playing  ·  Deezer")
+        else:
+            embed = discord.Embed(description=f"### {title}", color=0x2b2d31)
+            embed.set_author(name="Added to Queue  ·  Deezer")
+
+        embed.add_field(name="Artist", value=artist, inline=True)
         if album_art_url:
             embed.set_thumbnail(url=album_art_url)
-        embed.set_footer(
-            text=f"Requested by {interaction.user.display_name} • Via Deezer",
-            icon_url=interaction.user.display_avatar.url,
-        )
+        embed.set_footer(text=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
         await self.send_interaction(interaction, embed=embed)
         await send_log(self.bot, "COMMAND", f"{status} (Deezer): `{title}` by {artist}")
 
@@ -1121,21 +1021,21 @@ class Music(commands.Cog):
 
         artwork = getattr(track, "artwork", None)
         author = getattr(track, "author", "Unknown Artist")
-
         title_text = item.get("title") or "Unknown"
-        embed = discord.Embed(
-            title=f"🎧 {status_text}" if status_text != "Added to queue" else "📥 Added to Queue",
-            description=f"**[{title_text}]({item.get('uri')})**" if item.get("uri") else f"**{title_text}**",
-            color=0x2b2d31,
-        )
+        uri = item.get("uri")
+
+        if status_text == "Now playing":
+            embed = discord.Embed(description=f"### [{title_text}]({uri})" if uri else f"### {title_text}", color=0x1DB954)
+            embed.set_author(name="Now Playing")
+        else:
+            pos = len(self.get_queue(interaction.guild.id))
+            embed = discord.Embed(description=f"### [{title_text}]({uri})" if uri else f"### {title_text}", color=0x2b2d31)
+            embed.set_author(name=f"Added to Queue  ·  #{pos}")
+        
+        embed.add_field(name="Artist", value=author, inline=True)
         if artwork:
             embed.set_thumbnail(url=artwork)
-
-        embed.add_field(name="Channel / Artist", value=f"`{author}`", inline=True)
-        embed.set_footer(
-            text=f"Requested by {interaction.user.display_name}",
-            icon_url=interaction.user.display_avatar.url,
-        )
+        embed.set_footer(text=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
 
         try:
             await self.send_interaction(interaction, embed=embed)
@@ -1148,8 +1048,8 @@ class Music(commands.Cog):
 
         await send_log(self.bot, "COMMAND", f"{interaction.user} {status_text.lower()}: `{item[title]}`")
 
-    @discord.app_commands.command(name="play", description="Play a song via Lavalink (adds to queue) or Deezer via Deemix")
-    @discord.app_commands.describe(query="Song name or URL (YouTube, Spotify, Apple Music, or Deezer)")
+    @discord.app_commands.command(name="play", description="Play a song — tries Deezer first, falls back to YouTube")
+    @discord.app_commands.describe(query="Song name or URL")
     async def play(self, interaction: discord.Interaction, query: str):
         if await blocked(interaction):
             return
@@ -1159,113 +1059,57 @@ class Music(commands.Cog):
         except Exception:
             pass
 
-        # Check if this is a Deezer query
-        if is_deezer_query(query):
-            # === DEEZER PATH: Download via Deemix + play via Lavalink CDN ===
-            try:
-                file_path, title, artist, album_art = await self.download_deezer_track(query)
+        # === Direct URL path ===
+        if query.startswith(("http://", "https://", "spotify:")):
+            # Deezer URL
+            if is_deezer_query(query):
                 try:
+                    file_path, title, artist, album_art = await self.download_deezer_track(query)
                     await self.play_via_lavalink_from_file(interaction, file_path, title, artist, album_art)
                 except Exception as e:
-                    # CDN playback failed, try alternative: search by artist+title on Lavalink
-                    print(f"[Deezer] CDN playback failed: {e}, trying Lavalink search fallback")
-                    try:
-                        await self.ensure_lavalink(interaction)
-                        player = await self.ensure_voice(interaction)
-                        
-                        # Search for the track by artist + title on Lavalink
-                        search_query = f"ytsearch:{title} {artist}"
-                        results = await wavelink.Pool.fetch_tracks(search_query)
-                        track = None
-                        if isinstance(results, list):
-                            track = results[0] if results else None
-                        else:
-                            track = results.tracks[0] if getattr(results, "tracks", None) else None
-                        
-                        if track:
-                            print(f"[Deezer] ✓ Found fallback track on YouTube: {track.title}")
-                            guild_id = interaction.guild.id
-                            await player.play(track)
-                            self.deezer_now_playing[guild_id] = (title, artist)
-                            
-                            embed = discord.Embed(
-                                title="🎧 Now playing (YouTube fallback)",
-                                description=f"**{title}**",
-                                color=0x2b2d31,
-                            )
-                            embed.add_field(name="Channel / Artist", value=f"`{artist}`", inline=True)
-                            embed.set_footer(
-                                text=f"Requested by {interaction.user.display_name} • Via YouTube (Deezer unavailable)",
-                                icon_url=interaction.user.display_avatar.url,
-                            )
-                            await self.send_interaction(interaction, embed=embed)
-                            await send_log(self.bot, "COMMAND", f"Now playing (YouTube fallback): `{title}` by {artist}")
-                        else:
-                            raise RuntimeError("No fallback track found on YouTube")
-                    except Exception as fallback_error:
-                        await self.send_interaction(
-                            interaction,
-                            content=f"❌ Deezer and fallback playback failed: `{fallback_error}`",
-                            ephemeral=True,
-                        )
-            except Exception as e:
-                await self.send_interaction(
-                    interaction,
-                    content=f"❌ Deezer download error: `{e}`",
-                    ephemeral=True,
-                )
-            return
-
-        # === LAVALINK PATH: Existing logic for YouTube, Spotify, Apple Music ===
-        try:
-            await self.ensure_lavalink(interaction)
-            player = await self.ensure_voice(interaction)
-        except RuntimeError as e:
-            await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
-            return
-        except Exception as e:
-            await self.send_interaction(interaction, content=f"❌ Could not join voice channel: `{e}`", ephemeral=True)
-            return
-            
-        try:
-            if query.startswith(("http", "https", "spotify:", "appl:", "apple:")):
-                search_query = normalize_query_for_lavalink(query)
-            else:
-                if query.lower().startswith(("ytsearch:", "spsearch:", "amsearch:", "dzsearch:")):
-                    search_query = query
-                else:
-                    view = SourceSelectionView(self, interaction, query)
-                    embed = discord.Embed(
-                        title="🎵 Choose a source",
-                        description=f"Select where to search for **{query}**.",
-                        color=0x2b2d31,
-                    )
-                    embed.add_field(name="Options", value="YouTube • Spotify • Apple Music • Deezer", inline=False)
-                    await self.send_interaction(interaction, embed=embed, ephemeral=True, view=view)
-                    return
-
-            results = await wavelink.Pool.fetch_tracks(search_query)
-            track = None
-            if isinstance(results, list):
-                track = results[0] if results else None
-            else:
-                track = results.tracks[0] if getattr(results, "tracks", None) else None
-
-            if not track:
-                await self.send_interaction(interaction, content="❌ No audio tracks found for that query.")
+                    await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
                 return
-        except Exception as error:
-            message = str(error).lower()
-            if search_query.startswith("spsearch:") and ("forbidden" in message or "403" in message or "something went wrong while looking up the track" in message):
-                await self.send_interaction(
-                    interaction,
-                    content="⚠️ Spotify lookup failed. The current Lavalink setup is not authorized for that search. Please try YouTube or Apple Music instead.",
-                )
-            else:
-                await self.send_interaction(interaction, content=f"❌ Could not play audio: `{error}`")
+
+            # Other URL (YouTube, Spotify, etc.)
+            try:
+                await self.ensure_lavalink(interaction)
+                player = await self.ensure_voice(interaction)
+                search_query = normalize_query_for_lavalink(query)
+                results = await wavelink.Pool.fetch_tracks(search_query)
+                track = results[0] if isinstance(results, list) and results else (results.tracks[0] if getattr(results, "tracks", None) else None)
+                if not track:
+                    await self.send_interaction(interaction, content="❌ No track found for that URL.", ephemeral=True)
+                    return
+                await self.process_play_track(interaction, track)
+            except Exception as e:
+                await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
             return
 
-        await self.process_play_track(interaction, track)
+        # === Search path: try Deezer first, fall back to YouTube ===
+        deezer_ok = False
+        if DEEMIX_AVAILABLE and os.getenv("DEEZER_ARL_TOKEN", "").strip():
+            try:
+                tracks = await search_deezer_tracks(query)
+                if tracks:
+                    track_id = tracks[0]["id"]
+                    file_path, title, artist, album_art = await self.download_deezer_track(str(track_id))
+                    await self.play_via_lavalink_from_file(interaction, file_path, title, artist, album_art)
+                    deezer_ok = True
+            except Exception as e:
+                print(f"[Play] Deezer attempt failed: {e}, falling back to YouTube")
+
+        if not deezer_ok:
+            try:
+                await self.ensure_lavalink(interaction)
+                player = await self.ensure_voice(interaction)
+                results = await wavelink.Pool.fetch_tracks(f"ytsearch:{query}")
+                track = results[0] if isinstance(results, list) and results else None
+                if not track:
+                    await self.send_interaction(interaction, content="❌ No results found.", ephemeral=True)
+                    return
+                await self.process_play_track(interaction, track)
+            except Exception as e:
+                await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
 
     @discord.app_commands.command(name="skip", description="Skip the current track")
     @discord.app_commands.describe(reason="Skip reason (optional)")
