@@ -608,15 +608,14 @@ class Music(commands.Cog):
         print(f"[CDN] File path: {file_path}")
         
         # Upload file to Discord to get a streamable CDN URL
+        # NOTE: Do NOT delete the message until after Lavalink loads the track.
+        # Deleting it early can make the CDN URL inaccessible to Lavalink.
+        upload_msg = None
         try:
             f = discord.File(file_path, filename=Path(file_path).name)
             upload_msg = await interaction.channel.send(file=f)
             cdn_url = upload_msg.attachments[0].url
             print(f"[CDN] File uploaded, CDN URL obtained (length: {len(cdn_url)})")
-            try:
-                await upload_msg.delete()
-            except Exception:
-                pass
         except Exception as e:
             print(f"[CDN] Upload failed: {e}")
             raise RuntimeError(f"Could not upload file to Discord CDN: {e}")
@@ -686,14 +685,21 @@ class Music(commands.Cog):
                     wait_time = 0.5 + (attempt * 0.5)
                     await asyncio.sleep(wait_time)
 
+        # Delete the upload message now that Lavalink has loaded (or failed to load) the track
+        if upload_msg:
+            try:
+                await upload_msg.delete()
+            except Exception:
+                pass
+
         # Fallback to YouTube search if CDN failed
         if not track:
             print(f"[CDN] CDN failed after 6 attempts, falling back to YouTube search: {title} {artist}")
             try:
                 search_query = f"ytsearch:{title} {artist}"
-                results = await player.node.get_playlist(search_query)
-                if results and len(results.tracks) > 0:
-                    track = results.tracks[0]
+                results = await wavelink.Pool.fetch_tracks(search_query)
+                if results and len(results) > 0:
+                    track = results[0]
                     print(f"[CDN] ✓ YouTube fallback found: {track.title}")
             except Exception as e:
                 print(f"[CDN] YouTube fallback error: {e}")
