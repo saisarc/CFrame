@@ -409,10 +409,17 @@ class Music(commands.Cog):
                 await self._update_voice_status(player, title)
                 status_text = "Now playing"
             except Exception as play_error:
-                await self.send_interaction(
-                    interaction,
-                    content="⚠️ That track could not be played by Lavalink. Please try a different query or source.",
-                )
+                message = str(play_error).lower()
+                if "requires login" in message or "player configuration error" in message or "all clients failed" in message:
+                    await self.send_interaction(
+                        interaction,
+                        content="⚠️ That YouTube result could not be played. The video may be age-restricted, region-locked, or require login. Please try a different song or source.",
+                    )
+                else:
+                    await self.send_interaction(
+                        interaction,
+                        content="⚠️ That track could not be played by Lavalink. Please try a different query or source.",
+                    )
                 return
         else:
             q.append(item)
@@ -475,7 +482,15 @@ class Music(commands.Cog):
                 if query.lower().startswith(("ytsearch:", "spsearch:", "amsearch:", "dzsearch:")):
                     search_query = query
                 else:
-                    search_query = f"ytsearch:{query}"
+                    view = SourceSelectionView(self, interaction, query)
+                    embed = discord.Embed(
+                        title="🎵 Choose a source",
+                        description=f"Select where to search for **{query}**.",
+                        color=0x2b2d31,
+                    )
+                    embed.add_field(name="Options", value="YouTube • Spotify • Apple Music", inline=False)
+                    await self.send_interaction(interaction, embed=embed, ephemeral=True, view=view)
+                    return
 
             results = await wavelink.Pool.fetch_tracks(search_query)
             track = None
