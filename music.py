@@ -554,8 +554,17 @@ class Music(commands.Cog):
         else:
             print(f"[Deezer] No recent Deezer load for guild {guild_id}")
         
+        # Also check if current track is a Deezer CDN URL (more reliable)
+        current_track = getattr(player, "current", None)
+        if current_track:
+            current_uri = getattr(current_track, "uri", "") or ""
+            is_cdn_track = "cdn.discordapp.com" in current_uri or "media.discordapp.net" in current_uri
+            if is_cdn_track:
+                print(f"[Deezer] Current track IS a CDN URL, treating as 'playing' for queue")
+                deezer_recently_loaded = True
+        
         if deezer_recently_loaded:
-            print(f"[Deezer] ✓ Track recently loaded, treating as 'playing' for queue purposes")
+            print(f"[Deezer] ✓ Track recently loaded/playing, treating as 'playing' for queue purposes")
             should_play_now = False
 
         if should_play_now and not q:
