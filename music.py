@@ -550,32 +550,28 @@ class Music(commands.Cog):
             should_play_now = not bool(q) and not paused
             print(f"[Deezer] Queue logic: queue_len={len(q)}, paused={paused}, should_play_now={should_play_now}")
 
-        # Check if a Deezer track was recently loaded (within 5 seconds) - race condition check
+        # Check if should queue: look at is_playing(), is_paused(), queue, OR deezer_loaded flag
         current_time = time.time()
+        
+        # Strategy 1: Check deezer_loaded flag (tracks what we just played)
         deezer_recently_loaded = False
         if guild_id in self.deezer_loaded:
             time_since_load = current_time - self.deezer_loaded[guild_id]
-            deezer_recently_loaded = time_since_load < 5.0  # Extended to 5 seconds for upload time
-            print(f"[Deezer] Recently loaded check: time_since_load={time_since_load:.2f}s, within_5s={deezer_recently_loaded}")
-        else:
-            print(f"[Deezer] No recent Deezer load for guild {guild_id}")
+            deezer_recently_loaded = time_since_load < 5.0
+            print(f"[Deezer] Strategy 1 - Recently loaded: time_since_load={time_since_load:.2f}s, within_5s={deezer_recently_loaded}")
         
-        # Also check if current track is a Deezer CDN URL (more reliable)
+        # Strategy 2: Check current track URI (if Lavalink has already loaded it)
         current_track = getattr(player, "current", None)
-        print(f"[Deezer] Checking current_track: {current_track}")
+        is_cdn_playing = False
         if current_track:
             current_uri = getattr(current_track, "uri", "") or ""
-            print(f"[Deezer] current_track.uri = {current_uri[:100] if current_uri else 'EMPTY'}")
-            is_cdn_track = "cdn.discordapp.com" in current_uri or "media.discordapp.net" in current_uri
-            print(f"[Deezer] is_cdn_track check: cdn={('cdn.discordapp.com' in current_uri)}")
-            if is_cdn_track:
-                print(f"[Deezer] ✓ Current track IS a CDN URL, treating as 'playing' for queue")
-                deezer_recently_loaded = True
-        else:
-            print(f"[Deezer] current_track is None")
+            is_cdn_playing = "cdn.discordapp.com" in current_uri or "media.discordapp.net" in current_uri
+            print(f"[Deezer] Strategy 2 - Current track URI check: is_cdn={is_cdn_playing}")
         
-        if deezer_recently_loaded:
-            print(f"[Deezer] ✓ Deezer track recently loaded/playing, will QUEUE instead of playing immediately")
+        # If EITHER strategy says something is playing, queue instead of playing
+        should_queue_not_play = deezer_recently_loaded or is_cdn_playing
+        if should_queue_not_play:
+            print(f"[Deezer] ✓ Deezer track detected (loaded or playing), will QUEUE this next song")
             should_play_now = False
 
         if should_play_now and not q:
