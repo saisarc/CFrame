@@ -98,7 +98,7 @@ def get_deezer_cache_dir() -> Path:
 async def search_deezer_tracks(query: str) -> list[dict] | None:
     """
     Search Deezer for tracks using the Deezer API (no auth needed for search).
-    Returns list of dicts with {id, title, artist} or None on failure.
+    Returns list of dicts with {id, title, artist, album_art} or None on failure.
     """
     if not query or not query.strip():
         return None
@@ -115,10 +115,12 @@ async def search_deezer_tracks(query: str) -> list[dict] | None:
                     
                     tracks = []
                     for track in results:
+                        album = track.get("album", {})
                         tracks.append({
                             "id": track.get("id"),
                             "title": track.get("title", "Unknown"),
                             "artist": track.get("artist", {}).get("name", "Unknown Artist"),
+                            "album_art": album.get("cover_xl") or album.get("cover_big") or album.get("cover"),
                         })
                     return tracks if tracks else None
         return None
@@ -509,14 +511,14 @@ class Music(commands.Cog):
         print(f"[CDN] File path: {file_path}")
         
         # Upload file to Discord to get a streamable CDN URL
-        # NOTE: Do NOT delete the message until after Lavalink loads the track.
-        # Deleting it early can make the CDN URL inaccessible to Lavalink.
+        # We delete immediately after getting the URL — Discord CDN serves the file
+        # independently of the message existing.
         upload_msg = None
         try:
             f = discord.File(file_path, filename=Path(file_path).name)
-            upload_msg = await interaction.channel.send(file=f)
+            upload_msg = await interaction.channel.send(file=f, delete_after=0)
             cdn_url = upload_msg.attachments[0].url
-            print(f"[CDN] File uploaded, CDN URL obtained (length: {len(cdn_url)})")
+            print(f"[CDN] File uploaded and scheduled for immediate deletion, CDN URL: {cdn_url[:80]}...")
         except Exception as e:
             print(f"[CDN] Upload failed: {e}")
             raise RuntimeError(f"Could not upload file to Discord CDN: {e}")
@@ -637,15 +639,15 @@ class Music(commands.Cog):
         self.deezer_now_playing[guild_id] = (title, artist)
 
         if status == "Now playing":
-            embed = discord.Embed(description=f"### {title}", color=0x1DB954)
+            embed = discord.Embed(color=0x1DB954)
             embed.set_author(name="Now Playing  ·  Deezer")
         else:
-            embed = discord.Embed(description=f"### {title}", color=0x2b2d31)
-            embed.set_author(name="Added to Queue  ·  Deezer")
+            embed = discord.Embed(color=0x2b2d31)
+            embed.set_author(name="Queued  ·  Deezer")
 
-        embed.add_field(name="Artist", value=artist, inline=True)
+        embed.description = f"**{title}**\n{artist}"
         if album_art_url:
-            embed.set_thumbnail(url=album_art_url)
+            embed.set_image(url=album_art_url)
         embed.set_footer(text=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
         await self.send_interaction(interaction, embed=embed)
         await send_log(self.bot, "COMMAND", f"{status} (Deezer): `{title}` by {artist}")
@@ -1025,16 +1027,16 @@ class Music(commands.Cog):
         uri = item.get("uri")
 
         if status_text == "Now playing":
-            embed = discord.Embed(description=f"### [{title_text}]({uri})" if uri else f"### {title_text}", color=0x1DB954)
+            embed = discord.Embed(color=0x1DB954)
             embed.set_author(name="Now Playing")
         else:
             pos = len(self.get_queue(interaction.guild.id))
-            embed = discord.Embed(description=f"### [{title_text}]({uri})" if uri else f"### {title_text}", color=0x2b2d31)
-            embed.set_author(name=f"Added to Queue  ·  #{pos}")
-        
-        embed.add_field(name="Artist", value=author, inline=True)
+            embed = discord.Embed(color=0x2b2d31)
+            embed.set_author(name=f"Queued  ·  #{pos}")
+
+        embed.description = f"**{title_text}**\n{author}" + (f"\n[Open]({uri})" if uri else "")
         if artwork:
-            embed.set_thumbnail(url=artwork)
+            embed.set_image(url=artwork)
         embed.set_footer(text=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
 
         try:
@@ -1092,7 +1094,8 @@ class Music(commands.Cog):
                 tracks = await search_deezer_tracks(query)
                 if tracks:
                     track_id = tracks[0]["id"]
-                    file_path, title, artist, album_art = await self.download_deezer_track(str(track_id))
+                    album_art = tracks[0].get("album_art")
+                    file_path, title, artist, _ = await self.download_deezer_track(str(track_id))
                     await self.play_via_lavalink_from_file(interaction, file_path, title, artist, album_art)
                     deezer_ok = True
             except Exception as e:
