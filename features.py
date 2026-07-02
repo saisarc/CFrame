@@ -132,8 +132,16 @@ async def save_guild_settings(guild_id: int, settings: dict):
     if os.getenv("MONGODB_URI"):
         try:
             await mongo.set_guild_settings(guild_id, settings)
+            print(
+                "[mongo] saved guild_settings "
+                f"guild_id={guild_id} "
+                f"log_channel_id={settings.get('log_channel_id')} "
+                f"welcome_channel_id={settings.get('welcome_channel_id')} "
+                f"welcome_enabled={settings.get('welcome_enabled')}"
+            )
         except Exception:
             # avoid crashing moderation features if DB is temporarily down
+            print(f"[mongo] failed to save guild_settings guild_id={guild_id}")
             return
 
 

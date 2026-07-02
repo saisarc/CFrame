@@ -4,10 +4,6 @@ from typing import Any, Dict, Optional, List
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
-
-_MONGO_URI = os.getenv("MONGODB_URI")
-_MONGO_DB_NAME = os.getenv("MONGODB_DB", "cframe")
-
 _client: Optional[AsyncIOMotorClient] = None
 _db: Optional[AsyncIOMotorDatabase] = None
 
@@ -21,18 +17,21 @@ async def init_mongo() -> None:
     if _client is not None and _db is not None:
         return
 
-    if not _MONGO_URI:
+    mongo_uri = os.getenv("MONGODB_URI")
+    mongo_db_name = os.getenv("MONGODB_DB", "cframe")
+
+    if not mongo_uri:
         raise RuntimeError(
             "MONGODB_URI is not set. Add it to your environment variables (Atlas connection string)."
         )
 
     _client = AsyncIOMotorClient(
-        _MONGO_URI,
+        mongo_uri,
         serverSelectionTimeoutMS=5000,
         connectTimeoutMS=5000,
         maxPoolSize=int(os.getenv("MONGODB_MAX_POOL_SIZE", "10")),
     )
-    _db = _client[_MONGO_DB_NAME]
+    _db = _client[mongo_db_name]
 
     # Trigger server selection early to fail fast
     await _db.command("ping")
