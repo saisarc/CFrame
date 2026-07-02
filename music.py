@@ -128,25 +128,39 @@ async def search_deezer_tracks(query: str) -> list[dict] | None:
 
 
 class _DeemixListener:
-    """Minimal deemix listener that logs events and captures the saved file path."""
+    """Minimal deemix listener that logs events and captures the saved file path and album art."""
     def __init__(self):
         self.saved_path: str | None = None
+        self.album_art_url: str | None = None
         self.completed: list[dict] = []  # track dicts from downloadInfo state=tagged
 
     def send(self, key, value=None):
         print(f"[Deemix] {key}: {value!r}")
         if isinstance(value, dict):
-            # Capture downloadPath from updateQueue events (most reliable)
-            if key == "updateQueue" and value.get("downloaded") is True:
+            # Capture downloadPath from updateQueue events (most reliable, only if not already set)
+            if key == "updateQueue" and value.get("downloaded") is True and not self.saved_path:
                 path = value.get("downloadPath")
                 if path:
                     self.saved_path = str(path)
                     print(f"[Deemix] Captured downloadPath: {path}")
             
-            # Direct path keys (some deemix versions include these)
-            for k in ("path", "filename", "file"):
-                if value.get(k):
-                    self.saved_path = str(value[k])
+            # Capture album art URL from downloadInfo metadata
+            if key == "downloadInfo" and not self.album_art_url:
+                data = value.get("data")
+                if isinstance(data, dict):
+                    # Try common album art fields in Deemix metadata
+                    for art_field in ("picUrl", "picture", "cover", "coverUrl", "albumArt"):
+                        if data.get(art_field):
+                            self.album_art_url = str(data[art_field])
+                            print(f"[Deemix] Captured album art: {art_field}")
+                            break
+            
+            # Direct path keys (fallback only if downloadPath not captured)
+            if not self.saved_path:
+                for k in ("path", "filename", "file"):
+                    if value.get(k):
+                        self.saved_path = str(value[k])
+            
             # Capture completed track metadata for fallback filename search
             if key == "downloadInfo" and value.get("state") == "tagged":
                 data = value.get("data")
@@ -193,8 +207,8 @@ class SourceSelectionView(discord.ui.View):
                 track_id = tracks[0]["id"]
                 
                 # Download and play
-                file_path, title, artist = await self.cog.download_deezer_track(str(track_id))
-                await self.cog.play_via_lavalink_from_file(interaction, file_path, title, artist)
+                file_path, title, artist, album_art = await self.cog.download_deezer_track(str(track_id))
+                await self.cog.play_via_lavalink_from_file(interaction, file_path, title, artist, album_art)
 
             except Exception as e:
                 await self.cog.send_interaction(
@@ -473,26 +487,27 @@ class Music(commands.Cog):
             for attempt in range(200):  # 20 seconds with 0.1s checks
                 time.sleep(0.1)
                 
-                # Check if listener got the download-complete event
-                if listener.completed:
-                    print(f"[Deemix] Download event received after {attempt * 0.1:.1f}s")
-                    
-                    # Give filesystem a moment to write the file to disk
-                    time.sleep(0.5)
-                    
-                    # Check if a file actually appears in cache_dir now
-                    audio_exts = {".mp3", ".flac", ".m4a", ".ogg", ".opus"}
-                    for f in cache_dir.rglob("*"):
-                        if f.is_file() and f.suffix.lower() in audio_exts:
-                            print(f"[Deemix] File detected on disk: {f.name}")
+                # Check if listener captured the downloadPath (most reliable indicator)
+                if listener.saved_path:
+                    p = Path(listener.saved_path)
+                    if p.exists() and p.stat().st_size > 0:
+                        print(f"[Deemix] Download complete with captured path after {attempt * 0.1:.1f}s")
+                        file_found = True
+                        break
+                
+                # Fallback: check if listener got the download-complete event
+                if listener.completed and not listener.saved_path:
+                    print(f"[Deemix] Download event received after {attempt * 0.1:.1f}s (waiting for path capture)")
+                    # Give a bit more time for updateQueue with downloadPath to arrive
+                    time.sleep(0.3)
+                    if listener.saved_path:
+                        p = Path(listener.saved_path)
+                        if p.exists() and p.stat().st_size > 0:
                             file_found = True
                             break
                     
-                    if file_found:
-                        break
-                    
             if not file_found:
-                print(f"[Deemix] Did not see download event or file, will retry with file detection")
+                print(f"[Deemix] Did not capture downloadPath via events, will use file detection strategies")
 
             # Strategy 0: use listener's captured downloadPath directly (most reliable)
             new_files = set()
@@ -569,7 +584,7 @@ class Music(commands.Cog):
                     "Check Railway logs for [Deemix] events to diagnose."
                 )
 
-            return (str(list(new_files)[0]), title, artist)
+            return (str(list(new_files)[0]), title, artist, listener.album_art_url)
 
         try:
             result = await asyncio.to_thread(_do_download)
@@ -581,7 +596,7 @@ class Music(commands.Cog):
         except Exception as e:
             raise RuntimeError(f"Unexpected download error: {e}")
 
-    async def play_via_lavalink_from_file(self, interaction: discord.Interaction, file_path: str, title: str, artist: str):
+    async def play_via_lavalink_from_file(self, interaction: discord.Interaction, file_path: str, title: str, artist: str, album_art_url: str = None):
         """
         Upload a local audio file to Discord CDN then play via Lavalink.
         Avoids discord.py native voice UDP (blocked on Railway).
@@ -717,6 +732,8 @@ class Music(commands.Cog):
             color=0x2b2d31,
         )
         embed.add_field(name="Channel / Artist", value=f"`{artist}`", inline=True)
+        if album_art_url:
+            embed.set_thumbnail(url=album_art_url)
         embed.set_footer(
             text=f"Requested by {interaction.user.display_name} • Via Deezer",
             icon_url=interaction.user.display_avatar.url,
@@ -1118,9 +1135,9 @@ class Music(commands.Cog):
         if is_deezer_query(query):
             # === DEEZER PATH: Download via Deemix + play via Lavalink CDN ===
             try:
-                file_path, title, artist = await self.download_deezer_track(query)
+                file_path, title, artist, album_art = await self.download_deezer_track(query)
                 try:
-                    await self.play_via_lavalink_from_file(interaction, file_path, title, artist)
+                    await self.play_via_lavalink_from_file(interaction, file_path, title, artist, album_art)
                 except Exception as e:
                     # CDN playback failed, try alternative: search by artist+title on Lavalink
                     print(f"[Deezer] CDN playback failed: {e}, trying Lavalink search fallback")
@@ -1682,6 +1699,155 @@ class Music(commands.Cog):
             await player.set_filters(filters)
             embed = make_embed("🎚️ LowPass Enabled", "Higher frequencies suppressed (smoothing: `20`)")
             await interaction.followup.send(embed=embed)
+
+    @discord.app_commands.command(name="shuffle", description="Shuffle the music queue")
+    async def shuffle(self, interaction: discord.Interaction):
+        if await blocked(interaction):
+            return
+        
+        guild_id = interaction.guild_id
+        player = self.active_players.get(guild_id)
+        
+        if not player or not player.queue or len(player.queue) == 0:
+            await interaction.response.send_message("❌ The queue is empty.", ephemeral=True)
+            return
+        
+        import random
+        queue_list = list(player.queue)
+        random.shuffle(queue_list)
+        
+        # Clear and rebuild queue
+        player.queue.clear()
+        for track in queue_list:
+            player.queue.put(track)
+        
+        embed = make_embed("🔀 Queue Shuffled", f"Shuffled {len(queue_list)} tracks.")
+        await interaction.response.send_message(embed=embed)
+
+    @discord.app_commands.command(name="repeat", description="Set repeat mode")
+    @discord.app_commands.describe(mode="repeat mode: off, one, or all")
+    async def repeat(self, interaction: discord.Interaction, mode: str):
+        if await blocked(interaction):
+            return
+        
+        mode = mode.lower()
+        if mode not in ["off", "one", "all"]:
+            await interaction.response.send_message("❌ Mode must be `off`, `one`, or `all`.", ephemeral=True)
+            return
+        
+        guild_id = interaction.guild_id
+        self.repeat_modes[guild_id] = mode
+        
+        emoji = {"off": "⛔", "one": "🔂", "all": "🔁"}[mode]
+        embed = make_embed(f"{emoji} Repeat Mode", f"Repeat: `{mode.upper()}`")
+        await interaction.response.send_message(embed=embed)
+
+    @discord.app_commands.command(name="volume", description="Set playback volume (0-100)")
+    @discord.app_commands.describe(level="Volume level 0-100")
+    async def volume(self, interaction: discord.Interaction, level: int):
+        if await blocked(interaction):
+            return
+        
+        if not 0 <= level <= 100:
+            await interaction.response.send_message("❌ Volume must be between 0 and 100.", ephemeral=True)
+            return
+        
+        guild_id = interaction.guild_id
+        player = self.active_players.get(guild_id)
+        
+        if not player:
+            await interaction.response.send_message("❌ Not connected to voice.", ephemeral=True)
+            return
+        
+        await player.set_volume(level)
+        self.volumes[guild_id] = level
+        
+        embed = make_embed("🔊 Volume Set", f"Volume: `{level}%`")
+        await interaction.response.send_message(embed=embed)
+
+    @discord.app_commands.command(name="remove", description="Remove a track from the queue")
+    @discord.app_commands.describe(position="Position in queue (1-based)")
+    async def remove(self, interaction: discord.Interaction, position: int):
+        if await blocked(interaction):
+            return
+        
+        guild_id = interaction.guild_id
+        player = self.active_players.get(guild_id)
+        
+        if not player or not player.queue or len(player.queue) == 0:
+            await interaction.response.send_message("❌ The queue is empty.", ephemeral=True)
+            return
+        
+        if position < 1 or position > len(player.queue):
+            await interaction.response.send_message(f"❌ Position must be between 1 and {len(player.queue)}.", ephemeral=True)
+            return
+        
+        queue_list = list(player.queue)
+        removed_track = queue_list.pop(position - 1)
+        
+        player.queue.clear()
+        for track in queue_list:
+            player.queue.put(track)
+        
+        embed = make_embed("🗑️ Track Removed", f"Removed: `{removed_track.title}`")
+        await interaction.response.send_message(embed=embed)
+
+    @discord.app_commands.command(name="lyrics", description="Show lyrics for the current song")
+    async def lyrics(self, interaction: discord.Interaction):
+        if await blocked(interaction):
+            return
+        
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        except Exception:
+            pass
+        
+        guild_id = interaction.guild_id
+        
+        # Get current track title/artist from Deezer now-playing cache
+        if guild_id not in self.deezer_now_playing:
+            await self.send_interaction(interaction, content="❌ No track playing.", ephemeral=True)
+            return
+        
+        title, artist = self.deezer_now_playing[guild_id]
+        
+        try:
+            # Try to fetch lyrics from Genius API
+            async with aiohttp.ClientSession() as session:
+                headers = {"User-Agent": "CFrame-Bot"}
+                params = {"q": f"{title} {artist}"}
+                async with session.get("https://api.genius.com/search", params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        hits = data.get("response", {}).get("hits", [])
+                        
+                        if hits:
+                            song = hits[0]["result"]
+                            url = song.get("url", "")
+                            artist_name = song.get("primary_artist", {}).get("name", "Unknown")
+                            title_name = song.get("title", "Unknown")
+                            
+                            embed = discord.Embed(
+                                title=f"🎵 {title_name}",
+                                description=f"By {artist_name}\n\n[View Full Lyrics]({url})",
+                                color=0xFFFF64,
+                                url=url
+                            )
+                            embed.set_thumbnail(url=song.get("song_art_image_url", ""))
+                            embed.set_footer(text="Lyrics from Genius")
+                            await self.send_interaction(interaction, embed=embed)
+                            return
+        except Exception as e:
+            print(f"[Lyrics] Genius API error: {e}")
+        
+        # Fallback: show message with track info
+        embed = discord.Embed(
+            title=f"🎵 {title}",
+            description=f"By {artist}\n\n[Search Genius](https://genius.com/search?q={title.replace(' ', '+')}+{artist.replace(' ', '+')})",
+            color=0x2b2d31
+        )
+        await self.send_interaction(interaction, embed=embed)
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
