@@ -231,6 +231,8 @@ class GameCommands(commands.Cog):
     def __init__(self, bot: commands.Bot, start_time: float):
         self.bot        = bot
         self.start_time = start_time
+        self._command_log_last_sent: dict[tuple[int, int, str], float] = {}
+        self._command_log_cooldown = float(os.getenv("COMMAND_LOG_COOLDOWN_SECONDS", "2.0"))
         self.countdown_task.start()
 
     def cog_unload(self):
@@ -298,8 +300,23 @@ class GameCommands(commands.Cog):
         if interaction.type != discord.InteractionType.application_command:
             return
         cmd = interaction.command.name if interaction.command else "unknown"
-        if cmd in ("devlog", "updates", "hype", "countdown", "patchpreview"):
+        if cmd in (
+            "devlog", "updates", "hype", "countdown", "patchpreview",
+            # Music commands emit dedicated logs in the music cog.
+            "play", "deemix", "join", "leave", "skip", "pause", "resume",
+            "queue", "nowplaying", "seek", "filter", "shuffle", "repeat",
+            "volume", "remove", "lyrics", "voiceupdate", "voiceupdatedisable",
+        ):
             return  # these log themselves in the modal
+
+        # Throttle repeated logs for the same user/cmd/channel to reduce log spam.
+        key = (interaction.channel_id or 0, interaction.user.id, cmd)
+        now = time.monotonic()
+        last_sent = self._command_log_last_sent.get(key, 0.0)
+        if now - last_sent < self._command_log_cooldown:
+            return
+        self._command_log_last_sent[key] = now
+
         await send_log(
             self.bot, "COMMAND",
             f"**/{cmd}** used by **{interaction.user}** in <#{interaction.channel_id}>",

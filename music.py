@@ -210,6 +210,9 @@ class Music(commands.Cog):
         self.last_playing_track: dict[int, str] = {}  # guild_id -> track.identifier
         self.idle_since: dict[int, float] = {}          # guild_id -> timestamp when idle started
         self._last_text_channel: dict[int, int] = {}    # guild_id -> channel_id for idle messages
+        self._progress_last_update_at: dict[int, float] = {}
+        self._progress_last_payload: dict[int, tuple[str, str]] = {}
+        self._progress_min_interval = float(os.getenv("PROGRESS_EDIT_MIN_INTERVAL", "1.0"))
 
         bot.loop.create_task(self.connect_node())
         bot.loop.create_task(self.queue_worker())
@@ -357,6 +360,9 @@ class Music(commands.Cog):
         def _do_download():
             import time
             start_ts = time.time()
+            max_wait_seconds = float(os.getenv("DEEMIX_WAIT_MAX_SECONDS", "12"))
+            poll_interval = float(os.getenv("DEEMIX_POLL_INTERVAL", "0.1"))
+            max_wait_loops = max(1, int(max_wait_seconds / poll_interval))
 
             dz = DeezerClient()
             if not dz.login_via_arl(arl_token):
@@ -392,23 +398,23 @@ class Music(commands.Cog):
             listener = _DeemixListener()
             DeemixDownloader(dz, dl_obj, settings, listener).start()
 
-            # Wait for deemix to download the file (up to 20 seconds)
+            # Wait for deemix to download the file (configurable, defaults to 12s)
             print(f"[Deemix] Waiting for download to complete...")
             file_found = False
-            for attempt in range(200):  # 20 seconds with 0.1s checks
-                time.sleep(0.1)
+            for attempt in range(max_wait_loops):
+                time.sleep(poll_interval)
                 
                 # Check if listener captured the downloadPath (most reliable indicator)
                 if listener.saved_path:
                     p = Path(listener.saved_path)
                     if p.exists() and p.stat().st_size > 0:
-                        print(f"[Deemix] Download complete with captured path after {attempt * 0.1:.1f}s")
+                        print(f"[Deemix] Download complete with captured path after {attempt * poll_interval:.1f}s")
                         file_found = True
                         break
                 
                 # Fallback: check if listener got the download-complete event
                 if listener.completed and not listener.saved_path:
-                    print(f"[Deemix] Download event received after {attempt * 0.1:.1f}s (waiting for path capture)")
+                    print(f"[Deemix] Download event received after {attempt * poll_interval:.1f}s (waiting for path capture)")
                     # Give a bit more time for updateQueue with downloadPath to arrive
                     time.sleep(0.3)
                     if listener.saved_path:
@@ -442,7 +448,16 @@ class Music(commands.Cog):
                         pass
                     return result
 
-                new_files = _new_files_in(cache_dir)
+                # Fast path: most downloads are in the top-level cache directory.
+                try:
+                    audio_exts = {".mp3", ".flac", ".m4a", ".ogg", ".opus"}
+                    top_level = {
+                        f for f in cache_dir.glob("*")
+                        if f.is_file() and f.suffix.lower() in audio_exts and f.stat().st_size > 0 and f.stat().st_mtime >= (start_ts - 3)
+                    }
+                except Exception:
+                    top_level = set()
+                new_files = top_level or _new_files_in(cache_dir)
 
             # Strategy 2: check deemix default fallback locations
             if not new_files:
@@ -527,14 +542,17 @@ class Music(commands.Cog):
 
         # Wait for Discord CDN to be available and indexed by Lavalink
         print(f"[CDN] CDN URL: {cdn_url[:100]}...")
-        print(f"[CDN] Waiting 3.5 seconds for Discord CDN to be indexed...")
-        await asyncio.sleep(3.5)
+        cdn_index_wait = float(os.getenv("CDN_INDEX_WAIT_SECONDS", "1.5"))
+        print(f"[CDN] Waiting {cdn_index_wait:.1f} seconds for Discord CDN to be indexed...")
+        await asyncio.sleep(cdn_index_wait)
 
         # Try to load track via Lavalink REST API endpoint with retry logic
         track = None
-        for attempt in range(1, 7):  # 6 attempts with short waits = fast
+        max_cdn_attempts = int(os.getenv("CDN_LOAD_MAX_ATTEMPTS", "4"))
+        base_retry_wait = float(os.getenv("CDN_LOAD_RETRY_BASE_SECONDS", "0.35"))
+        for attempt in range(1, max_cdn_attempts + 1):
             try:
-                print(f"[CDN] Attempt {attempt}/6: Loading from CDN")
+                print(f"[CDN] Attempt {attempt}/{max_cdn_attempts}: Loading from CDN")
                 
                 # Get Lavalink node
                 node = wavelink.Pool.get_node()
@@ -573,14 +591,13 @@ class Music(commands.Cog):
                         else:
                             print(f"[CDN] HTTP {resp.status} response")
                 
-                if not track and attempt < 6:
-                    # Short waits: 1s, 1.5s, 2s, 2.5s, 3s
-                    wait_time = 0.5 + (attempt * 0.5)
+                if not track and attempt < max_cdn_attempts:
+                    wait_time = base_retry_wait * attempt
                     await asyncio.sleep(wait_time)
             except Exception as e:
                 print(f"[CDN] Attempt {attempt} error: {type(e).__name__}: {e}")
-                if attempt < 6:
-                    wait_time = 0.5 + (attempt * 0.5)
+                if attempt < max_cdn_attempts:
+                    wait_time = base_retry_wait * attempt
                     await asyncio.sleep(wait_time)
 
         # Delete the upload message now that Lavalink has loaded (or failed to load) the track
@@ -727,15 +744,31 @@ class Music(commands.Cog):
 
     async def start_progress_message(self, interaction: discord.Interaction, step: str, detail: str | None = None) -> discord.Message | None:
         try:
-            return await interaction.followup.send(embed=self._build_progress_embed(step, detail), wait=True)
+            msg = await interaction.followup.send(embed=self._build_progress_embed(step, detail), wait=True)
+            if msg:
+                self._progress_last_update_at[msg.id] = time.monotonic()
+                self._progress_last_payload[msg.id] = (step, detail or "")
+            return msg
         except Exception:
             return None
 
     async def update_progress_message(self, progress_message: discord.Message | None, step: str, detail: str | None = None):
         if not progress_message:
             return
+        payload = (step, detail or "")
+        msg_id = progress_message.id
+        if self._progress_last_payload.get(msg_id) == payload:
+            return
+
+        now = time.monotonic()
+        last_at = self._progress_last_update_at.get(msg_id, 0.0)
+        if now - last_at < self._progress_min_interval:
+            return
+
         try:
             await progress_message.edit(embed=self._build_progress_embed(step, detail))
+            self._progress_last_update_at[msg_id] = now
+            self._progress_last_payload[msg_id] = payload
         except Exception:
             pass
 
@@ -1290,7 +1323,7 @@ class Music(commands.Cog):
         deezer_query: str,
         progress_message: discord.Message | None = None,
         preferred_album_art: str | None = None,
-        max_attempts: int = 3,
+        max_attempts: int = 2,
     ) -> None:
         """Try downloaded-track playback multiple times to tolerate late file availability."""
         last_error: Exception | None = None
@@ -1340,6 +1373,8 @@ class Music(commands.Cog):
         except Exception:
             pass
 
+        deezer_only_mode = os.getenv("DEEZER_ONLY_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
+
         progress_message = await self.start_progress_message(interaction, "Fetching track", f"Query: `{query[:120]}`")
 
         # === Direct URL path ===
@@ -1356,6 +1391,13 @@ class Music(commands.Cog):
                     await self.fail_progress_message(progress_message, str(e))
                     if not progress_message:
                         await self.send_interaction(interaction, content=f"❌ {e}")
+                return
+
+            if deezer_only_mode:
+                msg = "This bot is currently configured for Deezer-only playback. Please use a Deezer link or search query."
+                await self.fail_progress_message(progress_message, msg)
+                if not progress_message:
+                    await self.send_interaction(interaction, content=f"❌ {msg}")
                 return
 
             # Other URL (YouTube, Spotify, etc.)
@@ -1395,7 +1437,14 @@ class Music(commands.Cog):
                     )
                     deezer_ok = True
             except Exception as e:
-                print(f"[Play] Deezer attempt failed: {e}, falling back to YouTube")
+                print(f"[Play] Deezer attempt failed: {e}")
+
+        if deezer_only_mode and not deezer_ok:
+            msg = "Could not play that request from Deezer. Please try another query or Deezer link."
+            await self.fail_progress_message(progress_message, msg)
+            if not progress_message:
+                await self.send_interaction(interaction, content=f"❌ {msg}")
+            return
 
         if not deezer_ok:
             try:
