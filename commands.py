@@ -101,14 +101,39 @@ class DevlogModal(discord.ui.Modal, title="Post Dev Log"):
                                      placeholder="- Added new map\n- Fixed bug\n- Better performance", max_length=2000)
     log_image = discord.ui.TextInput(label="Image URL (optional)", placeholder="https://i.imgur.com/example.png",
                                      required=False, max_length=500)
+
+    def __init__(self, target_channel_id: int):
+        super().__init__()
+        self.target_channel_id = target_channel_id
+
     async def on_submit(self, interaction: discord.Interaction):
         embed = discord.Embed(title=f"📋 Dev Log — {self.log_title.value}", description=self.log_body.value, color=0x5865F2)
         embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
         if self.log_image.value:
             embed.set_image(url=self.log_image.value)
         embed.set_footer(text=f"CFrame Dev Log · {time.strftime('%B %d, %Y')}")
-        await interaction.response.send_message(embed=embed)
-        await send_log(interaction.client, "COMMAND", f"{interaction.user} posted a **devlog**: `{self.log_title.value}`")
+
+        target_channel = None
+        if interaction.guild:
+            target_channel = interaction.guild.get_channel(self.target_channel_id)
+            if not target_channel:
+                target_channel = interaction.guild.get_thread(self.target_channel_id)
+
+        if not target_channel:
+            await interaction.response.send_message("❌ Could not find that channel.", ephemeral=True)
+            return
+
+        try:
+            posted = await target_channel.send(embed=embed)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Could not post in that channel: `{e}`", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            f"✅ Devlog posted in {target_channel.mention}: {posted.jump_url}",
+            ephemeral=True,
+        )
+        await send_log(interaction.client, "COMMAND", f"{interaction.user} posted a **devlog** in <#{self.target_channel_id}>: `{self.log_title.value}`")
 
 class UpdateModal(discord.ui.Modal, title="Post Update"):
     update_version = discord.ui.TextInput(label="Version", placeholder="v1.2.0", max_length=30)
@@ -471,12 +496,13 @@ class GameCommands(commands.Cog):
 
     # ── /devlog ───────────────────────────────────────────────────────────────
     @discord.app_commands.command(name="devlog", description="Post a development log (staff only)")
-    async def devlog(self, interaction: discord.Interaction):
+    @discord.app_commands.describe(channel="Channel where the devlog embed should be posted")
+    async def devlog(self, interaction: discord.Interaction, channel: discord.TextChannel):
         if await blocked(interaction): return
         if not interaction.user.guild_permissions.manage_messages:
             await interaction.response.send_message("❌ Staff only.", ephemeral=True)
             return
-        await interaction.response.send_modal(DevlogModal())
+        await interaction.response.send_modal(DevlogModal(channel.id))
 
     # ── /updates ──────────────────────────────────────────────────────────────
     @discord.app_commands.command(name="updates", description="Post a game update / patch notes (staff only)")
