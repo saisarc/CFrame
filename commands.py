@@ -102,9 +102,10 @@ class DevlogModal(discord.ui.Modal, title="Post Dev Log"):
     log_image = discord.ui.TextInput(label="Image URL (optional)", placeholder="https://i.imgur.com/example.png",
                                      required=False, max_length=500)
 
-    def __init__(self, target_channel_id: int):
+    def __init__(self, target_channel_id: int, ping_text: str | None = None):
         super().__init__()
         self.target_channel_id = target_channel_id
+        self.ping_text = ping_text
 
     async def on_submit(self, interaction: discord.Interaction):
         embed = discord.Embed(title=f"📋 Dev Log — {self.log_title.value}", description=self.log_body.value, color=0x5865F2)
@@ -124,7 +125,11 @@ class DevlogModal(discord.ui.Modal, title="Post Dev Log"):
             return
 
         try:
-            posted = await target_channel.send(embed=embed)
+            posted = await target_channel.send(
+                content=self.ping_text,
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=False),
+            )
         except Exception as e:
             await interaction.response.send_message(f"❌ Could not post in that channel: `{e}`", ephemeral=True)
             return
@@ -496,13 +501,39 @@ class GameCommands(commands.Cog):
 
     # ── /devlog ───────────────────────────────────────────────────────────────
     @discord.app_commands.command(name="devlog", description="Post a development log (staff only)")
-    @discord.app_commands.describe(channel="Channel where the devlog embed should be posted")
-    async def devlog(self, interaction: discord.Interaction, channel: discord.TextChannel):
+    @discord.app_commands.describe(
+        channel="Channel where the devlog embed should be posted",
+        ping="Optional broad ping",
+        role="Optional role to mention",
+    )
+    @discord.app_commands.choices(ping=[
+        discord.app_commands.Choice(name="None", value="none"),
+        discord.app_commands.Choice(name="@here", value="here"),
+        discord.app_commands.Choice(name="@everyone", value="everyone"),
+    ])
+    async def devlog(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+        ping: discord.app_commands.Choice[str] | None = None,
+        role: discord.Role | None = None,
+    ):
         if await blocked(interaction): return
         if not interaction.user.guild_permissions.manage_messages:
             await interaction.response.send_message("❌ Staff only.", ephemeral=True)
             return
-        await interaction.response.send_modal(DevlogModal(channel.id))
+
+        parts = []
+        ping_value = (ping.value if ping else "none").lower()
+        if ping_value == "here":
+            parts.append("@here")
+        elif ping_value == "everyone":
+            parts.append("@everyone")
+        if role:
+            parts.append(role.mention)
+
+        ping_text = " ".join(parts) if parts else None
+        await interaction.response.send_modal(DevlogModal(channel.id, ping_text=ping_text))
 
     # ── /updates ──────────────────────────────────────────────────────────────
     @discord.app_commands.command(name="updates", description="Post a game update / patch notes (staff only)")
