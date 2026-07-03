@@ -642,7 +642,7 @@ class Music(commands.Cog):
                 await self.send_interaction(interaction, embed=embed)
         else:
             await self.send_interaction(interaction, embed=embed)
-        await send_log(self.bot, "COMMAND", f"{status}: `{title}` by {artist} (source=deezer_file)")
+        await self.log_play_source(interaction, title, artist, "deezer_file", status)
 
 
 
@@ -746,6 +746,11 @@ class Music(commands.Cog):
             await progress_message.edit(embed=self._build_progress_error_embed(message))
         except Exception:
             pass
+
+    async def log_play_source(self, interaction: discord.Interaction, title: str, artist: str, source: str, status_text: str):
+        """Log playback source to stdout only (Railway logs)."""
+        user_name = str(getattr(interaction, "user", "unknown"))
+        print(f"[PlaySource] user={user_name} status={status_text} source={source} title={title} artist={artist}")
 
     async def ensure_lavalink(self, interaction: discord.Interaction):
         if await self.is_node_connected():
@@ -1277,11 +1282,7 @@ class Music(commands.Cog):
         else:
             source = "other"
 
-        await send_log(
-            self.bot,
-            "COMMAND",
-            f"{interaction.user} {status_text.lower()}: `{item['title']}` (source={source})",
-        )
+        await self.log_play_source(interaction, item["title"], author, source, status_text)
 
     async def _play_downloaded_track_with_retries(
         self,
