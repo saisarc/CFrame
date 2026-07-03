@@ -477,21 +477,9 @@ class Music(commands.Cog):
                     except Exception:
                         pass
 
-            # Strategy 4: last resort — most recently modified audio file in cache
-            if not new_files:
-                audio_exts = {".mp3", ".flac", ".m4a", ".ogg", ".opus"}
-                candidates = [
-                    f for f in cache_dir.rglob("*")
-                    if f.is_file() and f.suffix.lower() in audio_exts and f.stat().st_size > 0
-                ]
-                if candidates:
-                    newest = max(candidates, key=lambda f: f.stat().st_mtime)
-                    new_files.add(newest)
-                    print(f"[Deemix] Using most-recent file as fallback: {newest}")
-
             if not new_files:
                 raise RuntimeError(
-                    f"Download ran but no file appeared in `{cache_dir}` or fallback dirs. "
+                    f"Download ran but no matching file appeared in `{cache_dir}` or fallback dirs. "
                     "Check Railway logs for [Deemix] events to diagnose."
                 )
 
@@ -507,7 +495,7 @@ class Music(commands.Cog):
         except Exception as e:
             raise RuntimeError(f"Unexpected download error: {e}")
 
-    async def play_via_lavalink_from_file(self, interaction: discord.Interaction, file_path: str, title: str, artist: str, album_art_url: str = None):
+    async def play_via_lavalink_from_file(self, interaction: discord.Interaction, file_path: str, title: str, artist: str, album_art_url: str = None, progress_message: discord.Message | None = None):
         """
         Upload a local audio file to Discord CDN then play via Lavalink.
         Avoids discord.py native voice UDP (blocked on Railway).
@@ -528,10 +516,12 @@ class Music(commands.Cog):
             print(f"[CDN] Upload failed: {e}")
             raise RuntimeError(f"Could not upload file to Discord CDN: {e}")
 
+        await self.update_progress_message(progress_message, "Loading track", "Connecting player and preparing playback...")
+
         # Ensure Lavalink and voice
         await self.ensure_lavalink(interaction)
         try:
-            player = await self.ensure_voice(interaction)
+            player = await self.ensure_voice(interaction, notify=not bool(progress_message))
         except RuntimeError:
             raise
 
@@ -600,20 +590,10 @@ class Music(commands.Cog):
             except Exception:
                 pass
 
-        # Fallback to YouTube search if CDN failed
+        # Do not silently fallback to another source here; if loading the prepared
+        # track fails, surface an explicit error to the user.
         if not track:
-            print(f"[CDN] CDN failed after 6 attempts, falling back to YouTube search: {title} {artist}")
-            try:
-                search_query = f"ytsearch:{title} {artist}"
-                results = await wavelink.Pool.fetch_tracks(search_query)
-                track = results[0] if isinstance(results, list) and results else (results.tracks[0] if getattr(results, "tracks", None) else None)
-                if track:
-                    print(f"[CDN] ✓ YouTube fallback found: {track.title}")
-            except Exception as e:
-                print(f"[CDN] YouTube fallback error: {e}")
-        
-        if not track:
-            raise RuntimeError("Could not load track from CDN or YouTube fallback")
+            raise RuntimeError("Could not load the prepared track for playback.")
 
         guild_id = interaction.guild.id
 
@@ -646,17 +626,23 @@ class Music(commands.Cog):
 
         if status == "Now playing":
             embed = discord.Embed(color=0x1DB954)
-            embed.set_author(name="Now Playing  ·  Deezer")
+            embed.set_author(name="Now Playing")
         else:
             embed = discord.Embed(color=0x2b2d31)
-            embed.set_author(name="Queued  ·  Deezer")
+            embed.set_author(name="Queued")
 
         embed.description = f"**{title}**\n{artist}"
         if album_art_url:
             embed.set_image(url=album_art_url)
         embed.set_footer(text=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-        await self.send_interaction(interaction, embed=embed)
-        await send_log(self.bot, "COMMAND", f"{status} (Deezer): `{title}` by {artist}")
+        if progress_message:
+            try:
+                await progress_message.edit(embed=embed)
+            except Exception:
+                await self.send_interaction(interaction, embed=embed)
+        else:
+            await self.send_interaction(interaction, embed=embed)
+        await send_log(self.bot, "COMMAND", f"{status}: `{title}` by {artist} (source=deezer_file)")
 
 
 
@@ -725,13 +711,39 @@ class Music(commands.Cog):
             except Exception:
                 pass
 
-    async def send_status_update(self, interaction: discord.Interaction, step: str, detail: str | None = None):
-        """Send a small ephemeral progress update for long-running operations."""
+    def _build_progress_embed(self, step: str, detail: str | None = None) -> discord.Embed:
         embed = discord.Embed(color=0x5865F2)
-        embed.set_author(name="Working on your request...")
+        embed.set_author(name="Playback")
         embed.description = f"**{step}**" + (f"\n{detail}" if detail else "")
+        embed.set_footer(text="CFrame Music")
+        return embed
+
+    def _build_progress_error_embed(self, message: str) -> discord.Embed:
+        embed = discord.Embed(color=0xED4245)
+        embed.set_author(name="Playback")
+        embed.description = f"❌ {message}"
+        embed.set_footer(text="CFrame Music")
+        return embed
+
+    async def start_progress_message(self, interaction: discord.Interaction, step: str, detail: str | None = None) -> discord.Message | None:
         try:
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            return await interaction.followup.send(embed=self._build_progress_embed(step, detail), wait=True)
+        except Exception:
+            return None
+
+    async def update_progress_message(self, progress_message: discord.Message | None, step: str, detail: str | None = None):
+        if not progress_message:
+            return
+        try:
+            await progress_message.edit(embed=self._build_progress_embed(step, detail))
+        except Exception:
+            pass
+
+    async def fail_progress_message(self, progress_message: discord.Message | None, message: str):
+        if not progress_message:
+            return
+        try:
+            await progress_message.edit(embed=self._build_progress_error_embed(message))
         except Exception:
             pass
 
@@ -1046,16 +1058,17 @@ class Music(commands.Cog):
             await asyncio.sleep(1)
 
 
-    async def ensure_voice(self, interaction: discord.Interaction):
+    async def ensure_voice(self, interaction: discord.Interaction, notify: bool = True):
         if not interaction.user.voice or not interaction.user.voice.channel:
-            try:
-                msg = "❌ You must join a voice channel first."
-                if not interaction.response.is_done():
-                    await interaction.response.send_message(msg, ephemeral=True)
-                else:
-                    await interaction.followup.send(msg, ephemeral=True)
-            except Exception:
-                pass
+            if notify:
+                try:
+                    msg = "❌ You must join a voice channel first."
+                    if not interaction.response.is_done():
+                        await interaction.response.send_message(msg, ephemeral=True)
+                    else:
+                        await interaction.followup.send(msg, ephemeral=True)
+                except Exception:
+                    pass
             raise RuntimeError("user not in voice channel")
             
         channel = interaction.user.voice.channel
@@ -1141,14 +1154,20 @@ class Music(commands.Cog):
         embed = make_embed("👋 Disconnected", "Successfully cleared the queue and left the channel.")
         await interaction.response.send_message(embed=embed)
 
-    async def process_play_track(self, interaction: discord.Interaction, track: wavelink.Playable):
+    async def process_play_track(self, interaction: discord.Interaction, track: wavelink.Playable, progress_message: discord.Message | None = None):
         try:
-            player = await self.ensure_voice(interaction)
+            player = await self.ensure_voice(interaction, notify=not bool(progress_message))
         except RuntimeError as e:
-            await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
+            if progress_message:
+                await self.fail_progress_message(progress_message, str(e))
+            else:
+                await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
             return
         except Exception as e:
-            await self.send_interaction(interaction, content=f"❌ Could not join voice channel: `{e}`", ephemeral=True)
+            if progress_message:
+                await self.fail_progress_message(progress_message, f"Could not join voice channel: {e}")
+            else:
+                await self.send_interaction(interaction, content=f"❌ Could not join voice channel: `{e}`", ephemeral=True)
             return
 
         guild_id = interaction.guild.id
@@ -1199,15 +1218,21 @@ class Music(commands.Cog):
                     # Track is not playing, show the error
                     message = str(play_error).lower()
                     if "requires login" in message or "player configuration error" in message or "all clients failed" in message:
-                        await self.send_interaction(
-                            interaction,
-                            content="⚠️ That YouTube result could not be played. The video may be age-restricted, region-locked, or require login. Please try a different song or source.",
-                        )
+                        if progress_message:
+                            await self.fail_progress_message(progress_message, "That track could not be played. Please try a different song.")
+                        else:
+                            await self.send_interaction(
+                                interaction,
+                                content="⚠️ That track could not be played. Please try a different song.",
+                            )
                     else:
-                        await self.send_interaction(
-                            interaction,
-                            content="⚠️ That track could not be played by Lavalink. Please try a different query or source.",
-                        )
+                        if progress_message:
+                            await self.fail_progress_message(progress_message, "That track could not be played. Please try another query.")
+                        else:
+                            await self.send_interaction(
+                                interaction,
+                                content="⚠️ That track could not be played. Please try another query.",
+                            )
                     return
         else:
             q.append(item)
@@ -1231,18 +1256,79 @@ class Music(commands.Cog):
             embed.set_image(url=artwork)
         embed.set_footer(text=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
 
-        try:
-            await self.send_interaction(interaction, embed=embed)
-        except Exception as response_error:
-            print(f"Failed to finish interaction response: {response_error}")
+        if progress_message:
             try:
-                await interaction.followup.send(embed=embed)
+                await progress_message.edit(embed=embed)
             except Exception:
                 pass
+        else:
+            try:
+                await self.send_interaction(interaction, embed=embed)
+            except Exception as response_error:
+                print(f"Failed to finish interaction response: {response_error}")
+                try:
+                    await interaction.followup.send(embed=embed)
+                except Exception:
+                    pass
 
-        await send_log(self.bot, "COMMAND", f"{interaction.user} {status_text.lower()}: `{item['title']}`")
+        uri_lower = str(item.get("uri") or "").lower()
+        if "youtube.com" in uri_lower or "youtu.be" in uri_lower:
+            source = "youtube"
+        else:
+            source = "other"
 
-    @discord.app_commands.command(name="play", description="Play a song — tries Deezer first, falls back to YouTube")
+        await send_log(
+            self.bot,
+            "COMMAND",
+            f"{interaction.user} {status_text.lower()}: `{item['title']}` (source={source})",
+        )
+
+    async def _play_downloaded_track_with_retries(
+        self,
+        interaction: discord.Interaction,
+        deezer_query: str,
+        progress_message: discord.Message | None = None,
+        preferred_album_art: str | None = None,
+        max_attempts: int = 3,
+    ) -> None:
+        """Try downloaded-track playback multiple times to tolerate late file availability."""
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await self.update_progress_message(
+                    progress_message,
+                    "Fetching track",
+                    f"Preparing your track (attempt {attempt}/{max_attempts})...",
+                )
+
+                file_path, title, artist, album_art = await self.download_deezer_track(deezer_query)
+                final_album_art = preferred_album_art or album_art
+
+                await self.update_progress_message(progress_message, "Loading track", "Loading track data...")
+                await self.play_via_lavalink_from_file(
+                    interaction,
+                    file_path,
+                    title,
+                    artist,
+                    final_album_art,
+                    progress_message=progress_message,
+                )
+                return
+            except Exception as e:
+                last_error = e
+                if attempt < max_attempts:
+                    await self.update_progress_message(
+                        progress_message,
+                        "Fetching track",
+                        "Track is still processing, retrying...",
+                    )
+                    await asyncio.sleep(2 * attempt)
+
+        if last_error:
+            raise last_error
+
+    @discord.app_commands.command(name="play", description="Play a song")
     @discord.app_commands.describe(query="Song name or URL")
     async def play(self, interaction: discord.Interaction, query: str):
         if await blocked(interaction):
@@ -1253,66 +1339,80 @@ class Music(commands.Cog):
         except Exception:
             pass
 
-        await self.send_status_update(interaction, "Searching for a playable source...", f"Query: `{query[:120]}`")
+        progress_message = await self.start_progress_message(interaction, "Fetching track", f"Query: `{query[:120]}`")
 
         # === Direct URL path ===
         if query.startswith(("http://", "https://", "spotify:")):
             # Deezer URL
             if is_deezer_query(query):
                 try:
-                    await self.send_status_update(interaction, "Deezer link detected", "Downloading track and preparing stream...")
-                    file_path, title, artist, album_art = await self.download_deezer_track(query)
-                    await self.send_status_update(interaction, "Deezer download complete", "Loading the track into Lavalink...")
-                    await self.play_via_lavalink_from_file(interaction, file_path, title, artist, album_art)
+                    await self._play_downloaded_track_with_retries(
+                        interaction,
+                        query,
+                        progress_message=progress_message,
+                    )
                 except Exception as e:
-                    await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
+                    await self.fail_progress_message(progress_message, str(e))
+                    if not progress_message:
+                        await self.send_interaction(interaction, content=f"❌ {e}")
                 return
 
             # Other URL (YouTube, Spotify, etc.)
             try:
-                await self.send_status_update(interaction, "Resolving URL", "Contacting Lavalink and fetching the track...")
+                await self.update_progress_message(progress_message, "Loading track", "Fetching track data...")
                 await self.ensure_lavalink(interaction)
-                player = await self.ensure_voice(interaction)
+                await self.ensure_voice(interaction, notify=not bool(progress_message))
                 search_query = normalize_query_for_lavalink(query)
                 results = await wavelink.Pool.fetch_tracks(search_query)
                 track = results[0] if isinstance(results, list) and results else (results.tracks[0] if getattr(results, "tracks", None) else None)
                 if not track:
-                    await self.send_interaction(interaction, content="❌ No track found for that URL.", ephemeral=True)
+                    await self.fail_progress_message(progress_message, "No track found for that URL.")
+                    if not progress_message:
+                        await self.send_interaction(interaction, content="❌ No track found for that URL.")
                     return
-                await self.process_play_track(interaction, track)
+                await self.process_play_track(interaction, track, progress_message=progress_message)
             except Exception as e:
-                await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
+                await self.fail_progress_message(progress_message, str(e))
+                if not progress_message:
+                    await self.send_interaction(interaction, content=f"❌ {e}")
             return
 
-        # === Search path: try Deezer first, fall back to YouTube ===
+        # === Search path: primary search, then fallback ===
         deezer_ok = False
         if DEEMIX_AVAILABLE and os.getenv("DEEZER_ARL_TOKEN", "").strip():
             try:
-                await self.send_status_update(interaction, "Checking Deezer first", "Trying to find the best match...")
+                await self.update_progress_message(progress_message, "Fetching track", "Searching for the best match...")
                 tracks = await search_deezer_tracks(query)
                 if tracks:
                     track_id = tracks[0]["id"]
                     album_art = tracks[0].get("album_art")
-                    await self.send_status_update(interaction, "Deezer match found", "Downloading and preparing playback...")
-                    file_path, title, artist, _ = await self.download_deezer_track(str(track_id))
-                    await self.play_via_lavalink_from_file(interaction, file_path, title, artist, album_art)
+                    await self._play_downloaded_track_with_retries(
+                        interaction,
+                        str(track_id),
+                        progress_message=progress_message,
+                        preferred_album_art=album_art,
+                    )
                     deezer_ok = True
             except Exception as e:
                 print(f"[Play] Deezer attempt failed: {e}, falling back to YouTube")
 
         if not deezer_ok:
             try:
-                await self.send_status_update(interaction, "Using YouTube fallback", "Searching YouTube for a playable result...")
+                await self.update_progress_message(progress_message, "Fetching track", "Trying another lookup path...")
                 await self.ensure_lavalink(interaction)
-                player = await self.ensure_voice(interaction)
+                await self.ensure_voice(interaction, notify=not bool(progress_message))
                 results = await wavelink.Pool.fetch_tracks(f"ytsearch:{query}")
                 track = results[0] if isinstance(results, list) and results else (results.tracks[0] if getattr(results, "tracks", None) else None)
                 if not track:
-                    await self.send_interaction(interaction, content="❌ No results found.", ephemeral=True)
+                    await self.fail_progress_message(progress_message, "No results found.")
+                    if not progress_message:
+                        await self.send_interaction(interaction, content="❌ No results found.")
                     return
-                await self.process_play_track(interaction, track)
+                await self.process_play_track(interaction, track, progress_message=progress_message)
             except Exception as e:
-                await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
+                await self.fail_progress_message(progress_message, str(e))
+                if not progress_message:
+                    await self.send_interaction(interaction, content=f"❌ {e}")
 
     @discord.app_commands.command(name="nowplaying", description="Show what's currently playing with a progress bar")
     async def nowplaying(self, interaction: discord.Interaction):
@@ -1346,20 +1446,6 @@ class Music(commands.Cog):
         else:
             time_str = "`Live stream`"
 
-        # Detect source
-        if uri:
-            if "deezer" in uri or "deezer" in title.lower():
-                source = "Deezer"
-            elif "youtube" in uri or "youtu.be" in uri:
-                source = "YouTube"
-            elif "spotify" in uri:
-                source = "Spotify"
-            else:
-                source = "Audio"
-        else:
-            dz = self.deezer_now_playing.get(guild_id)
-            source = "Deezer" if dz and dz[0] == title else "Audio"
-
         dz = self.deezer_now_playing.get(guild_id)
         if dz and dz[0] == title:
             author = dz[1]
@@ -1368,7 +1454,7 @@ class Music(commands.Cog):
         repeat = self.repeat_modes.get(guild_id, "off")
 
         embed = discord.Embed(color=0x1DB954)
-        embed.set_author(name=f"Now Playing  ·  {source}")
+        embed.set_author(name="Now Playing")
         embed.description = f"### [{title}]({uri})\n{author}" if uri else f"### {title}\n{author}"
         embed.description += f"\n\n{time_str}"
         embed.add_field(name="Volume", value=f"{vol}%", inline=True)
@@ -1604,8 +1690,8 @@ class Music(commands.Cog):
 
         await interaction.response.send_message(embed=pages[0], view=QueuePaginator())
 
-    @discord.app_commands.command(name="deemix", description="Play a Deezer/DeeMix track or search query via Lavalink")
-    @discord.app_commands.describe(query="Deezer/DeeMix link or search query")
+    @discord.app_commands.command(name="deemix", description="Play a track from a direct link or search query")
+    @discord.app_commands.describe(query="Track link or search query")
     async def deemix(self, interaction: discord.Interaction, query: str):
         if await blocked(interaction):
             return
@@ -1623,7 +1709,7 @@ class Music(commands.Cog):
             await self.send_interaction(interaction, content=f"❌ {e}", ephemeral=True)
             return
         except Exception as e:
-            await self.send_interaction(interaction, content=f"❌ Could not prepare Deezer playback: `{e}`", ephemeral=True)
+            await self.send_interaction(interaction, content=f"❌ Could not prepare playback: `{e}`", ephemeral=True)
             return
 
         try:
@@ -1642,17 +1728,17 @@ class Music(commands.Cog):
                 track = results.tracks[0] if getattr(results, "tracks", None) else None
 
             if not track:
-                await self.send_interaction(interaction, content="❌ No Deezer/DeeMix track found for that query.")
+                await self.send_interaction(interaction, content="❌ No track found for that query.")
                 return
         except Exception as error:
             message = str(error).lower()
             if "master key" in message or "deezer" in message:
                 await self.send_interaction(
                     interaction,
-                    content="❌ Deezer/DeeMix is not available yet because your Lavalink server is missing a Deezer master key. Add `DEEZER_MASTER_KEY` and re-enable the Deezer source in Lavalink, then restart the service.",
+                    content="❌ This playback path is not available right now due to server configuration.",
                 )
             else:
-                await self.send_interaction(interaction, content=f"❌ Could not resolve Deezer playback: `{error}`")
+                await self.send_interaction(interaction, content=f"❌ Could not resolve playback: `{error}`")
             return
 
         await self.process_play_track(interaction, track)
@@ -1826,7 +1912,7 @@ class Music(commands.Cog):
                 page_title += f" (Part {idx + 1}/{len(chunks)})"
 
             embed = discord.Embed(title=page_title, description=chunk, color=0x2b2d31)
-            embed.set_footer(text=f"Source: {source_name} via {provider}")
+            embed.set_footer(text="CFrame Music")
 
             if idx == 0:
                 if interaction.response.is_done():
@@ -1911,7 +1997,7 @@ class Music(commands.Cog):
                 description=chunk,
                 color=0x2b2d31
             )
-            embed.set_footer(text=f"Source: {source_name} via {provider}")
+            embed.set_footer(text="CFrame Music")
             
             if idx == 0:
                 if interaction.response.is_done():
