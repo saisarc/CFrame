@@ -145,6 +145,36 @@ HELP_PAGES = [
                 "usage": "/welcometest",
                 "desc": "Send a test welcome message to the configured channel.",
             },
+            {
+                "name": "/setservericon",
+                "usage": "/setservericon <url>",
+                "desc": "Change the server icon from a direct image URL.",
+            },
+            {
+                "name": "/setserverbanner",
+                "usage": "/setserverbanner <url>",
+                "desc": "Change the server banner (requires Boost Level 2).",
+            },
+            {
+                "name": "/setbotavatar",
+                "usage": "/setbotavatar <url>",
+                "desc": "Change the bot's avatar from a direct image URL (owner only).",
+            },
+            {
+                "name": "/setvanityrole",
+                "usage": "/setvanityrole <keyword> <role>",
+                "desc": "Auto-assign a role to users whose status contains the keyword.",
+            },
+            {
+                "name": "/clearvanityrole",
+                "usage": "/clearvanityrole",
+                "desc": "Disable the vanity role system for this server.",
+            },
+            {
+                "name": "/role",
+                "usage": "/role <add|remove> <member> <role>",
+                "desc": "Manually add or remove a role from a member.",
+            },
         ],
     },
     {
@@ -199,6 +229,36 @@ HELP_PAGES = [
                 "name": "/slowmode",
                 "usage": "/slowmode <seconds 0-21600>",
                 "desc": "Set channel slowmode.",
+            },
+            {
+                "name": "/lock",
+                "usage": "/lock [channel] [reason]",
+                "desc": "Lock a channel so @everyone cannot send messages.",
+            },
+            {
+                "name": "/unlock",
+                "usage": "/unlock [channel] [reason]",
+                "desc": "Unlock a previously locked channel.",
+            },
+            {
+                "name": "/lockdown",
+                "usage": "/lockdown [reason]",
+                "desc": "Lock ALL text channels — emergency use, requires Administrator.",
+            },
+            {
+                "name": "/unlockdown",
+                "usage": "/unlockdown",
+                "desc": "Lift the server lockdown and restore all channels.",
+            },
+            {
+                "name": "/purge",
+                "usage": "/purge <user> [amount]",
+                "desc": "Delete recent messages from a specific user (scans up to 200).",
+            },
+            {
+                "name": "/softban",
+                "usage": "/softban <member> [delete_days] [reason]",
+                "desc": "Ban + instantly unban to delete messages without a permanent ban.",
             },
         ],
     },

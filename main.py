@@ -9,6 +9,7 @@ from dev_commands import DevCommands
 from extra_commands import ExtraCommands
 from features import Features
 from music import Music
+from server_tools import ServerTools
 
 load_dotenv()
 TOKEN      = os.getenv("DISCORD_TOKEN")
@@ -20,7 +21,8 @@ status_list = cycle(['Watching beeping booping', 'Playing in developer mode', 'P
 intents = discord.Intents.default()
 intents.message_content = True   # For prefix commands
 intents.voice_states = True      # For music voice tracking
-# Disabled: members, presences (not needed, saves memory)
+intents.presences = True         # For vanity role status watching (privileged — enable in Dev Portal)
+intents.members = True           # For presence updates on all members (privileged — enable in Dev Portal)
 
 bot = commands.Bot(
     command_prefix="!",
@@ -74,6 +76,7 @@ async def on_ready():
     await safe_add_cog(ExtraCommands, bot)
     await safe_add_cog(Features, bot)
     await safe_add_cog(Music, bot)
+    await safe_add_cog(ServerTools, bot)
 
     try:
         synced = await bot.tree.sync()
