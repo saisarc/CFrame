@@ -175,6 +175,16 @@ HELP_PAGES = [
                 "usage": "/role <add|remove> <member> <role>",
                 "desc": "Manually add or remove a role from a member.",
             },
+            {
+                "name": "/setchangelogwebhook",
+                "usage": "/setchangelogwebhook <url>",
+                "desc": "Set the webhook URL that /changelog posts to.",
+            },
+            {
+                "name": "/clearchangelogwebhook",
+                "usage": "/clearchangelogwebhook",
+                "desc": "Remove the configured changelog webhook.",
+            },
         ],
     },
     {
@@ -260,6 +270,16 @@ HELP_PAGES = [
                 "usage": "/softban <member> [delete_days] [reason]",
                 "desc": "Ban + instantly unban to delete messages without a permanent ban.",
             },
+            {
+                "name": "/setnick",
+                "usage": "/setnick <member> <nickname>",
+                "desc": "Force a nickname on a member.",
+            },
+            {
+                "name": "/resetnick",
+                "usage": "/resetnick <member>",
+                "desc": "Reset a member's nickname to their username.",
+            },
         ],
     },
     {
@@ -315,6 +335,21 @@ HELP_PAGES = [
                 "usage": "/reactionrole <add|remove|list> ...",
                 "desc": "Attach reaction roles to a message.",
             },
+            {
+                "name": "/afk",
+                "usage": "/afk [reason]",
+                "desc": "Set yourself AFK — bot auto-replies when you're mentioned.",
+            },
+            {
+                "name": "/customcmd",
+                "usage": "/customcmd <add|remove|list> [trigger] [response]",
+                "desc": "Add custom !trigger → response commands for this server.",
+            },
+            {
+                "name": "/statschannel",
+                "usage": "/statschannel <set|clear|list> [type] [channel]",
+                "desc": "Live voice channels showing member count, bots, and boost count.",
+            },
         ],
     },
     {
@@ -349,6 +384,11 @@ HELP_PAGES = [
                 "name": "/patchpreview",
                 "usage": "/patchpreview post|reveal ...",
                 "desc": "Tease then reveal patch notes (staff only).",
+            },
+            {
+                "name": "/changelog",
+                "usage": "/changelog [auto_publish]",
+                "desc": "Post a custom changelog via webhook (staff only).",
             },
             {
                 "name": "/testing",

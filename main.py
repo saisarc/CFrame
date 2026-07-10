@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from commands import GameCommands, send_log
 from dev_commands import DevCommands
 from extra_commands import ExtraCommands
-from features import Features
+from features import Features, CustomCommands
 from music import Music
 from server_tools import ServerTools
 
@@ -75,6 +75,7 @@ async def on_ready():
     await safe_add_cog(DevCommands, bot, start_time)
     await safe_add_cog(ExtraCommands, bot)
     await safe_add_cog(Features, bot)
+    await safe_add_cog(CustomCommands, bot)
     await safe_add_cog(Music, bot)
     await safe_add_cog(ServerTools, bot)
 

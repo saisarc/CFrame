@@ -1,7 +1,8 @@
 import os
+import time
 import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from commands import send_log, blocked
@@ -11,6 +12,8 @@ load_dotenv()
 
 DEV_ID = int(os.getenv("DEV_ID", "0"))
 
+# AFK store: (guild_id, user_id) → {"reason": str, "set_at": float}
+_afk_store: dict[tuple[int, int], dict] = {}
 
 async def _fetch_image_bytes(url: str, max_mb: int = 8) -> bytes:
     """Download an image from an http/https URL with basic SSRF guard.
@@ -33,6 +36,72 @@ async def _fetch_image_bytes(url: str, max_mb: int = 8) -> bytes:
             if len(data) > max_mb * 1024 * 1024:
                 raise ValueError(f"Image exceeds {max_mb} MB limit.")
             return data
+
+
+# ── CHANGELOG MODAL ───────────────────────────────────────────────────────────
+class ChangelogModal(discord.ui.Modal, title="Post Changelog"):
+    cl_title = discord.ui.TextInput(
+        label="Update Title",
+        placeholder="v2.4.0 — Performance Update",
+        max_length=100,
+    )
+    cl_version = discord.ui.TextInput(
+        label="Version Tag (optional)",
+        placeholder="v2.4.0",
+        required=False,
+        max_length=30,
+    )
+    cl_body = discord.ui.TextInput(
+        label="Changes",
+        style=discord.TextStyle.paragraph,
+        placeholder="\U0001f195 Added: ...\n\U0001f41b Fixed: ...\n\U0001f5d1\ufe0f Removed: ...",
+        max_length=2000,
+    )
+    cl_image = discord.ui.TextInput(
+        label="Banner Image URL (optional)",
+        placeholder="https://i.imgur.com/example.png",
+        required=False,
+        max_length=500,
+    )
+
+    def __init__(self, webhook_url: str, auto_publish: bool, posted_by: str):
+        super().__init__()
+        self.webhook_url  = webhook_url
+        self.auto_publish = auto_publish
+        self.posted_by    = posted_by
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        version_tag = self.cl_version.value.strip()
+        embed = discord.Embed(
+            title=f"\U0001f4cb {self.cl_title.value.strip()}",
+            description=self.cl_body.value,
+            color=0x5865F2,
+            timestamp=discord.utils.utcnow(),
+        )
+        if version_tag:
+            embed.add_field(name="Version", value=f"`{version_tag}`", inline=True)
+        embed.set_footer(text=f"Posted by {self.posted_by}")
+        image_url = self.cl_image.value.strip()
+        if image_url:
+            embed.set_image(url=image_url)
+        try:
+            async with aiohttp.ClientSession() as session:
+                webhook = discord.Webhook.from_url(self.webhook_url, session=session)
+                msg = await webhook.send(embed=embed, wait=True)
+                if self.auto_publish:
+                    try:
+                        await msg.publish()
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass  # Not an announcement channel or missing perms
+        except Exception as e:
+            await interaction.followup.send(f"\u274c Failed to send changelog: {e}", ephemeral=True)
+            return
+        await interaction.followup.send("\u2705 Changelog posted!", ephemeral=True)
+        await send_log(
+            interaction.client, "COMMAND",
+            f"{interaction.user} posted a **changelog**: `{self.cl_title.value.strip()}`",
+        )
 
 
 class ServerTools(commands.Cog):
@@ -435,3 +504,291 @@ class ServerTools(commands.Cog):
             f"{interaction.user} **{action}ed** {role.mention} "
             f"{'to' if action == 'add' else 'from'} {member.mention}.",
         )
+
+    # ── /setchangelogwebhook ──────────────────────────────────────────────────
+    @discord.app_commands.command(
+        name="setchangelogwebhook",
+        description="Set the Discord webhook URL used by /changelog",
+    )
+    @discord.app_commands.describe(url="Webhook URL from your changelog channel (Settings → Integrations → Webhooks)")
+    async def setchangelogwebhook(self, interaction: discord.Interaction, url: str):
+        if await blocked(interaction): return
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ You need **Manage Server** permission.", ephemeral=True)
+            return
+        url = url.strip()
+        if not (
+            url.startswith("https://discord.com/api/webhooks/")
+            or url.startswith("https://discordapp.com/api/webhooks/")
+            or url.startswith("https://ptb.discord.com/api/webhooks/")
+            or url.startswith("https://canary.discord.com/api/webhooks/")
+        ):
+            await interaction.response.send_message(
+                "❌ That doesn't look like a valid Discord webhook URL.\n"
+                "Copy it from **Channel Settings → Integrations → Webhooks**.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        settings = await load_guild_settings(interaction.guild_id)
+        settings["changelog_webhook_url"] = url
+        await save_guild_settings(interaction.guild_id, settings)
+        await interaction.followup.send(
+            "✅ Changelog webhook saved. Use `/changelog` to post.", ephemeral=True
+        )
+        await send_log(self.bot, "STATUS", f"{interaction.user} configured the **changelog webhook**.")
+
+    # ── /clearchangelogwebhook ────────────────────────────────────────────────
+    @discord.app_commands.command(
+        name="clearchangelogwebhook",
+        description="Remove the configured changelog webhook",
+    )
+    async def clearchangelogwebhook(self, interaction: discord.Interaction):
+        if await blocked(interaction): return
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ You need **Manage Server** permission.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        settings = await load_guild_settings(interaction.guild_id)
+        settings.pop("changelog_webhook_url", None)
+        await save_guild_settings(interaction.guild_id, settings)
+        await interaction.followup.send("✅ Changelog webhook removed.", ephemeral=True)
+        await send_log(self.bot, "STATUS", f"{interaction.user} removed the **changelog webhook**.")
+
+    # ── /changelog ────────────────────────────────────────────────────────────
+    @discord.app_commands.command(
+        name="changelog",
+        description="Post a custom changelog via webhook (staff only)",
+    )
+    @discord.app_commands.describe(
+        auto_publish="Crosspost/publish the message — only works in Announcement channels (default: True)",
+    )
+    async def changelog(self, interaction: discord.Interaction, auto_publish: bool = True):
+        if await blocked(interaction): return
+        if not interaction.user.guild_permissions.manage_messages:
+            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+            return
+        settings = await load_guild_settings(interaction.guild_id)
+        webhook_url = settings.get("changelog_webhook_url")
+        if not webhook_url:
+            await interaction.response.send_message(
+                "❌ No changelog webhook configured.\n"
+                "An admin needs to run `/setchangelogwebhook <url>` first.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(
+            ChangelogModal(
+                webhook_url=webhook_url,
+                auto_publish=auto_publish,
+                posted_by=interaction.user.display_name,
+            )
+        )
+
+    # ── /afk ──────────────────────────────────────────────────────────────────
+    @discord.app_commands.command(name="afk", description="Set yourself as AFK — the bot will auto-reply when you're mentioned")
+    @discord.app_commands.describe(reason="Why you're going AFK (optional)")
+    async def afk(self, interaction: discord.Interaction, reason: str = "AFK"):
+        if await blocked(interaction): return
+        key = (interaction.guild_id, interaction.user.id)
+        _afk_store[key] = {"reason": reason, "set_at": time.time()}
+        embed = discord.Embed(
+            description=f"💤 You're now AFK: **{reason}**",
+            color=0xFEE75C,
+        )
+        embed.set_footer(text="Send any message to clear your AFK status")
+        await interaction.response.send_message(embed=embed)
+
+    # ── AFK on_message watcher ──────────────────────────────────────────────────
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+
+        key = (message.guild.id, message.author.id)
+
+        # Clear AFK if the author was AFK
+        if key in _afk_store:
+            # Ignore the bot's own AFK confirmation message (the /afk command response)
+            # by checking that the content isn't empty and it's not an interaction followup
+            afk_data = _afk_store.pop(key)
+            elapsed = int(time.time() - afk_data["set_at"])
+            if elapsed < 3:
+                # Probably the interaction followup firing; restore and skip
+                _afk_store[key] = afk_data
+            else:
+                m_ago = elapsed // 60
+                label = f"{m_ago} minute{'s' if m_ago != 1 else ''} ago" if m_ago >= 1 else "just now"
+                try:
+                    await message.reply(
+                        f"✅ Welcome back {message.author.mention}! AFK cleared (was away {label}).",
+                        delete_after=8,
+                        mention_author=False,
+                    )
+                except Exception:
+                    pass
+
+        # Notify about AFK mentions
+        for mentioned in message.mentions:
+            if mentioned.bot:
+                continue
+            mention_key = (message.guild.id, mentioned.id)
+            if mention_key in _afk_store:
+                afk_data = _afk_store[mention_key]
+                elapsed = int(time.time() - afk_data["set_at"])
+                m_ago = elapsed // 60
+                label = f"{m_ago} minute{'s' if m_ago != 1 else ''} ago" if m_ago >= 1 else "just now"
+                try:
+                    await message.reply(
+                        f"💤 **{mentioned.display_name}** is AFK: *{afk_data['reason']}* (set {label}).",
+                        mention_author=False,
+                    )
+                except Exception:
+                    pass
+
+    # ── /setnick ───────────────────────────────────────────────────────────────
+    @discord.app_commands.command(name="setnick", description="Force a nickname on a member")
+    @discord.app_commands.describe(member="Target member", nickname="New nickname (max 32 chars)")
+    async def setnick(self, interaction: discord.Interaction, member: discord.Member, nickname: str):
+        if await blocked(interaction): return
+        if not interaction.user.guild_permissions.manage_nicknames:
+            await interaction.response.send_message("\u274c You need **Manage Nicknames** permission.", ephemeral=True)
+            return
+        if len(nickname) > 32:
+            await interaction.response.send_message("\u274c Nickname cannot exceed 32 characters.", ephemeral=True)
+            return
+        try:
+            await member.edit(nick=nickname, reason=f"Nickname set by {interaction.user}")
+            await interaction.response.send_message(f"✅ Set {member.mention}'s nickname to **{nickname}**.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("\u274c I can't change that member's nickname (they may be above me in role hierarchy).", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"\u274c Failed: {e}", ephemeral=True)
+            return
+        await send_log(self.bot, "COMMAND", f"{interaction.user} set {member.mention}'s nickname to `{nickname}`.")
+
+    # ── /resetnick ────────────────────────────────────────────────────────────
+    @discord.app_commands.command(name="resetnick", description="Reset a member's nickname to their username")
+    @discord.app_commands.describe(member="Target member")
+    async def resetnick(self, interaction: discord.Interaction, member: discord.Member):
+        if await blocked(interaction): return
+        if not interaction.user.guild_permissions.manage_nicknames:
+            await interaction.response.send_message("\u274c You need **Manage Nicknames** permission.", ephemeral=True)
+            return
+        try:
+            await member.edit(nick=None, reason=f"Nickname reset by {interaction.user}")
+            await interaction.response.send_message(f"✅ Reset {member.mention}'s nickname.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("\u274c I can't change that member's nickname.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"\u274c Failed: {e}", ephemeral=True)
+            return
+        await send_log(self.bot, "COMMAND", f"{interaction.user} reset {member.mention}'s nickname.")
+
+    # ── /statschannel ────────────────────────────────────────────────────────
+    _STAT_LABELS = {
+        "members": ("👥", "Members"),
+        "bots":    ("🤖", "Bots"),
+        "boosts":  ("✨", "Boosts"),
+    }
+
+    @discord.app_commands.command(name="statschannel", description="Configure voice channels that display live server stats")
+    @discord.app_commands.describe(
+        action="set, clear, or list",
+        stat_type="members, bots, or boosts",
+        channel="Voice channel to use as the stats display",
+    )
+    async def statschannel(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+        stat_type: str = None,
+        channel: discord.VoiceChannel = None,
+    ):
+        if await blocked(interaction): return
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("\u274c You need **Manage Server** permission.", ephemeral=True)
+            return
+        action = action.lower()
+        await interaction.response.defer(ephemeral=True)
+        settings = await load_guild_settings(interaction.guild_id)
+        stats_cfg = settings.setdefault("stats_channels", {})
+
+        if action == "set":
+            if not stat_type or not channel:
+                await interaction.followup.send("\u274c Provide both a `stat_type` and a `channel`.", ephemeral=True)
+                return
+            stat_type = stat_type.lower()
+            if stat_type not in self._STAT_LABELS:
+                await interaction.followup.send(f"\u274c Valid types: `{'`, `'.join(self._STAT_LABELS)}`", ephemeral=True)
+                return
+            stats_cfg[stat_type] = channel.id
+            settings["stats_channels"] = stats_cfg
+            await save_guild_settings(interaction.guild_id, settings)
+            emoji, label = self._STAT_LABELS[stat_type]
+            await interaction.followup.send(
+                f"✅ **{channel.name}** will now display `{emoji} {label}: ...` and update every 10 minutes.",
+                ephemeral=True,
+            )
+
+        elif action == "clear":
+            if not stat_type:
+                await interaction.followup.send("\u274c Provide a `stat_type` to clear.", ephemeral=True)
+                return
+            stat_type = stat_type.lower()
+            if stats_cfg.pop(stat_type, None) is not None:
+                settings["stats_channels"] = stats_cfg
+                await save_guild_settings(interaction.guild_id, settings)
+                await interaction.followup.send(f"✅ Cleared `{stat_type}` stats channel.", ephemeral=True)
+            else:
+                await interaction.followup.send(f"⚠️ No `{stat_type}` stats channel was configured.", ephemeral=True)
+
+        elif action == "list":
+            if not stats_cfg:
+                await interaction.followup.send("⚠️ No stats channels configured. Use `/statschannel set`.", ephemeral=True)
+                return
+            lines = []
+            for t, cid in stats_cfg.items():
+                emoji, label = self._STAT_LABELS.get(t, ("📊", t.title()))
+                ch = interaction.guild.get_channel(int(cid))
+                ch_str = ch.mention if ch else f"*deleted channel* ({cid})"
+                lines.append(f"`{t}` → {ch_str}")
+            await interaction.followup.send("ℹ️ Stats channels:\n" + "\n".join(lines), ephemeral=True)
+
+        else:
+            await interaction.followup.send("\u274c Use `set`, `clear`, or `list`.", ephemeral=True)
+
+    # ── Stats channel background updater ──────────────────────────────────────
+    def cog_load(self):
+        self._stats_update.start()
+
+    def cog_unload(self):
+        self._stats_update.cancel()
+
+    @tasks.loop(minutes=10)
+    async def _stats_update(self):
+        for guild in self.bot.guilds:
+            settings = get_guild_settings(guild.id)
+            stats_cfg = settings.get("stats_channels", {})
+            if not stats_cfg:
+                continue
+            humans = sum(1 for m in guild.members if not m.bot)
+            bots   = sum(1 for m in guild.members if m.bot)
+            boosts = guild.premium_subscription_count or 0
+            values = {"members": humans, "bots": bots, "boosts": boosts}
+            for stat_type, channel_id in list(stats_cfg.items()):
+                emoji, label = self._STAT_LABELS.get(stat_type, ("📊", stat_type.title()))
+                new_name = f"{emoji} {label}: {values.get(stat_type, 0):,}"
+                ch = guild.get_channel(int(channel_id))
+                if not ch or not isinstance(ch, discord.VoiceChannel):
+                    continue
+                if ch.name == new_name:
+                    continue  # no change, skip to avoid unnecessary API call
+                try:
+                    await ch.edit(name=new_name, reason="Stats channel update")
+                except Exception:
+                    pass
+
+    @_stats_update.before_loop
+    async def _before_stats_update(self):
+        await self.bot.wait_until_ready()

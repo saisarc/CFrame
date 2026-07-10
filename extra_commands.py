@@ -340,27 +340,112 @@ class ExtraCommands(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
     # ── /poll ─────────────────────────────────────────────────────────────────
-    @discord.app_commands.command(name="poll", description="Create a quick poll with up to 4 options")
+    @discord.app_commands.command(name="poll", description="Create a poll with up to 4 options — optionally auto-closes")
     @discord.app_commands.describe(
         question="The poll question",
         option1="First option", option2="Second option",
-        option3="Third option (optional)", option4="Fourth option (optional)"
+        option3="Third option (optional)", option4="Fourth option (optional)",
+        duration="Auto-close after this long, e.g. 10m, 1h, 2d (omit for permanent poll)",
     )
-    async def poll(self, interaction: discord.Interaction, question: str, option1: str, option2: str, option3: str = None, option4: str = None):
+    async def poll(
+        self,
+        interaction: discord.Interaction,
+        question: str,
+        option1: str,
+        option2: str,
+        option3: str = None,
+        option4: str = None,
+        duration: str = None,
+    ):
         if await blocked(interaction): return
         options = [o for o in [option1, option2, option3, option4] if o]
         emojis = ["🇦", "🇧", "🇨", "🇩"]
         lines = [f"{emojis[i]}  {opt}" for i, opt in enumerate(options)]
+
+        # Parse optional duration
+        seconds = None
+        duration_label = None
+        if duration:
+            match = re.fullmatch(r"(\d+)(s|m|h|d)", duration.strip().lower())
+            if not match:
+                await interaction.response.send_message("❌ Invalid duration format. Use `10m`, `2h`, `1d`, etc.", ephemeral=True)
+                return
+            amount, unit = int(match.group(1)), match.group(2)
+            seconds = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit] * amount
+            if seconds > 86400 * 7:
+                await interaction.response.send_message("❌ Max poll duration is 7 days.", ephemeral=True)
+                return
+            unit_names = {"s": "second", "m": "minute", "h": "hour", "d": "day"}
+            duration_label = f"{amount} {unit_names[unit]}{'s' if amount != 1 else ''}"
+
         embed = discord.Embed(
             title=f"📊  {question}",
             description="\n\n".join(lines),
             color=0x5865F2,
         )
-        embed.set_footer(text=f"Poll by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+        footer_text = f"Poll by {interaction.user.display_name}"
+        if duration_label:
+            footer_text += f"  ·  Closes in {duration_label}"
+        embed.set_footer(text=footer_text, icon_url=interaction.user.display_avatar.url)
         await interaction.response.send_message(embed=embed)
         msg = await interaction.original_response()
         for i in range(len(options)):
             await msg.add_reaction(emojis[i])
+
+        if seconds:
+            asyncio.create_task(self._close_poll(msg, question, options, emojis, seconds, interaction.channel_id))
+
+    async def _close_poll(
+        self,
+        msg: discord.Message,
+        question: str,
+        options: list[str],
+        emojis: list[str],
+        seconds: int,
+        channel_id: int,
+    ):
+        await asyncio.sleep(seconds)
+        try:
+            msg = await msg.channel.fetch_message(msg.id)
+        except Exception:
+            return
+
+        # Count votes (subtract 1 for the bot's own reaction)
+        reaction_map = {str(r.emoji): max(0, r.count - 1) for r in msg.reactions}
+        total = sum(reaction_map.get(emojis[i], 0) for i in range(len(options)))
+
+        lines = []
+        for i, opt in enumerate(options):
+            votes = reaction_map.get(emojis[i], 0)
+            pct = round(votes / total * 100) if total > 0 else 0
+            bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+            lines.append(f"{emojis[i]}  **{opt}**\n`{bar}` {votes} vote{'s' if votes != 1 else ''} ({pct}%)")
+
+        results_embed = discord.Embed(
+            title=f"📊 Poll Closed — {question}",
+            description="\n\n".join(lines),
+            color=0x57F287 if total > 0 else 0x99AAB5,
+        )
+        results_embed.set_footer(text=f"Total votes: {total}")
+
+        # Edit original to show it's closed
+        try:
+            closed_embed = discord.Embed(
+                title=f"📊  {question}",
+                description="\n\n".join(
+                    f"{emojis[i]}  {opt}" for i, opt in enumerate(options)
+                ) + "\n\n*⏰ This poll is now closed.*",
+                color=0x99AAB5,
+            )
+            closed_embed.set_footer(text="Poll closed")
+            await msg.edit(embed=closed_embed)
+        except Exception:
+            pass
+
+        try:
+            await msg.reply(embed=results_embed)
+        except Exception:
+            pass
 
     # ── /remind ───────────────────────────────────────────────────────────────
     @discord.app_commands.command(name="remind", description="Set a reminder — the bot will DM you")

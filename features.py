@@ -25,6 +25,7 @@ def _default_state():
         "giveaways": {},
         "anti_spam": {},
         "reaction_roles": {},
+        "custom_commands": {},
     }
 
 
@@ -47,7 +48,7 @@ def _load_state_file():
     else:
         state = _default_state()
 
-    for k in ("guild_settings", "xp_data", "warnings", "giveaways", "anti_spam", "reaction_roles"):
+    for k in ("guild_settings", "xp_data", "warnings", "giveaways", "anti_spam", "reaction_roles", "custom_commands"):
         state.setdefault(k, {})
 
 # MongoPersistence loads/saves only supported subsets.
@@ -545,6 +546,17 @@ class Features(commands.Cog):
             user_data["xp"] -= xp_for_level(user_data["level"])
             user_data["level"] += 1
         save_state()
+
+        # ── Custom command check ──────────────────────────────────────────────────
+        # (Checked after XP so leveling still fires on custom command messages)
+        guild_cmds = state["custom_commands"].get(str(message.guild.id), {})
+        if guild_cmds:
+            content_clean = message.content.strip().lower()
+            if content_clean in guild_cmds:
+                try:
+                    await message.channel.send(guild_cmds[content_clean])
+                except Exception:
+                    pass
 
     # ── /moderation — NEW Advanced overview & settings hub ─────────────────
     @discord.app_commands.command(
@@ -1157,3 +1169,79 @@ class Features(commands.Cog):
 
 
 a = Features
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+class CustomCommands(commands.Cog):
+    """Separate cog so /customcmd doesn't bloat the already-large Features cog."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    @discord.app_commands.command(name="customcmd", description="Add, remove, or list custom text commands for this server")
+    @discord.app_commands.describe(
+        action="add, remove, or list",
+        trigger="Exact text that triggers the response (e.g. !rules)",
+        response="What the bot replies with (used with \"add\", max 500 chars)",
+    )
+    async def customcmd(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+        trigger: str = None,
+        response: str = None,
+    ):
+        if await blocked(interaction): return
+        action = action.lower()
+        gid = str(interaction.guild_id)
+        guild_cmds = state["custom_commands"].setdefault(gid, {})
+
+        if action == "add":
+            if not interaction.user.guild_permissions.manage_messages:
+                await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+                return
+            if not trigger or not response:
+                await interaction.response.send_message("❌ Provide both a `trigger` and a `response`.", ephemeral=True)
+                return
+            if len(guild_cmds) >= 50:
+                await interaction.response.send_message("❌ Max 50 custom commands per server.", ephemeral=True)
+                return
+            if len(response) > 500:
+                await interaction.response.send_message("❌ Response must be 500 characters or fewer.", ephemeral=True)
+                return
+            guild_cmds[trigger.strip().lower()] = response.strip()
+            save_state()
+            await interaction.response.send_message(
+                f"✅ Custom command added: `{trigger.strip().lower()}` → *{response.strip()[:80]}{'...' if len(response) > 80 else ''}*",
+                ephemeral=True,
+            )
+
+        elif action == "remove":
+            if not interaction.user.guild_permissions.manage_messages:
+                await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+                return
+            if not trigger:
+                await interaction.response.send_message("❌ Provide the `trigger` to remove.", ephemeral=True)
+                return
+            key = trigger.strip().lower()
+            if guild_cmds.pop(key, None) is not None:
+                save_state()
+                await interaction.response.send_message(f"✅ Removed custom command `{key}`.", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"⚠️ No command found for `{key}`.", ephemeral=True)
+
+        elif action == "list":
+            if not guild_cmds:
+                await interaction.response.send_message("⚠️ No custom commands set. Use `/customcmd add`.", ephemeral=True)
+                return
+            lines = [f"`{t}` → {r[:60]}{'...' if len(r) > 60 else ''}" for t, r in sorted(guild_cmds.items())]
+            embed = discord.Embed(
+                title=f"🤖 Custom Commands ({len(guild_cmds)}/50)",
+                description="\n".join(lines),
+                color=0x5865F2,
+            )
+            embed.set_footer(text="CFrame Bot · Custom Commands")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        else:
+            await interaction.response.send_message("❌ Use `add`, `remove`, or `list`.", ephemeral=True)
