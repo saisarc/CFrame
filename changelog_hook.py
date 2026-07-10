@@ -116,7 +116,10 @@ try:
     req = urllib.request.Request(
         WEBHOOK_URL,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "DiscordBot (https://discord.com, 1.0)",
+        },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
