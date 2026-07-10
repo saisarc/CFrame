@@ -86,14 +86,13 @@ class ChangelogModal(discord.ui.Modal, title="Post Changelog"):
         if image_url:
             embed.set_image(url=image_url)
         try:
-            async with aiohttp.ClientSession() as session:
-                webhook = discord.Webhook.from_url(self.webhook_url, session=session)
-                msg = await webhook.send(embed=embed, wait=True)
-                if self.auto_publish:
-                    try:
-                        await msg.publish()
-                    except (discord.Forbidden, discord.HTTPException):
-                        pass  # Not an announcement channel or missing perms
+            webhook = discord.Webhook.from_url(self.webhook_url, client=interaction.client)
+            msg = await webhook.send(embed=embed, wait=True)
+            if self.auto_publish:
+                try:
+                    await msg.publish()
+                except (discord.Forbidden, discord.HTTPException):
+                    pass  # Not an announcement channel or missing perms
         except Exception as e:
             await interaction.followup.send(f"\u274c Failed to send changelog: {e}", ephemeral=True)
             return

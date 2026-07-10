@@ -9,6 +9,11 @@ from datetime import datetime, timezone
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
+try:
+    from mongo_store import get_guild_settings as _mongo_get_settings
+except Exception:
+    _mongo_get_settings = None
+
 load_dotenv()
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
@@ -144,12 +149,30 @@ class UpdateModal(discord.ui.Modal, title="Post Update"):
     update_version = discord.ui.TextInput(label="Version", placeholder="v1.2.0", max_length=30)
     update_body    = discord.ui.TextInput(label="Patch Notes", style=discord.TextStyle.paragraph,
                                           placeholder="🆕 Added: ...\n🐛 Fixed: ...\n🗑️ Removed: ...", max_length=2000)
+
+    def __init__(self, webhook_url: str | None = None):
+        super().__init__()
+        self.webhook_url = webhook_url
+
     async def on_submit(self, interaction: discord.Interaction):
-        embed = discord.Embed(title=f"🚀 Update {self.update_version.value}", description=self.update_body.value, color=0xFEE75C)
+        embed = discord.Embed(title=f"\U0001f680 Update {self.update_version.value}", description=self.update_body.value, color=0xFEE75C)
         embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-        embed.set_footer(text=f"CFrame Bot · {time.strftime('%B %d, %Y')}")
+        embed.set_footer(text=f"CFrame Bot \u00b7 {time.strftime('%B %d, %Y')}")
         await interaction.response.send_message(embed=embed)
         await send_log(interaction.client, "COMMAND", f"{interaction.user} posted an **update**: `{self.update_version.value}`")
+        if self.webhook_url:
+            asyncio.create_task(self._fire_webhook(interaction.client, embed))
+
+    async def _fire_webhook(self, client: discord.Client, embed: discord.Embed):
+        try:
+            webhook = discord.Webhook.from_url(self.webhook_url, client=client)
+            msg = await webhook.send(embed=embed, wait=True)
+            try:
+                await msg.publish()
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+        except Exception:
+            pass
 
 class HypeModal(discord.ui.Modal, title="Post Hype Announcement"):
     hype_title = discord.ui.TextInput(label="Title", placeholder="Something BIG is coming...", max_length=100)
@@ -559,7 +582,14 @@ class GameCommands(commands.Cog):
         if not interaction.user.guild_permissions.manage_messages:
             await interaction.response.send_message("❌ Staff only.", ephemeral=True)
             return
-        await interaction.response.send_modal(UpdateModal())
+        webhook_url = None
+        if _mongo_get_settings and os.getenv("MONGODB_URI"):
+            try:
+                settings = await _mongo_get_settings(interaction.guild_id)
+                webhook_url = (settings or {}).get("changelog_webhook_url")
+            except Exception:
+                pass
+        await interaction.response.send_modal(UpdateModal(webhook_url=webhook_url))
 
     # ── /testing ──────────────────────────────────────────────────────────────
     @discord.app_commands.command(name="testing", description="Manage beta testing signups")
